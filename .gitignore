@@ -5,7 +5,6 @@ __pycache__
 timelapse
 logs
 telegram.log
-telegram_dev.conf
 secrets_dev.conf
 .mypy_cache
 agent_workspace/

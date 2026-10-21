@@ -7,7 +7,7 @@ Klipper/Moonraker Telegram bot. Single Python app, no package structure: code li
 - Setup: `uv sync` (uv is the package manager; `pyproject.toml` + `uv.lock` are the source of truth).
 - Full check (what CI runs, in this order): `uv run prek run --all-files --show-diff-on-failure --color=always` then `uv run pytest -v`. `prek` is a pre-commit drop-in; hooks = ruff check --fix, ruff format, mypy, codespell, pyproject-fmt, requirements sync.
 - Single test: `uv run pytest -v tests/websocket_helper_test.py::test_name`.
-- Run locally: `uv run python3 bot/main.py -c telegram_dev.conf`. Config sample sections: `tests/resources/*.conf`.
+- Run locally: `uv run python3 bot/main.py -c agent_workspace/telegram_dev.conf`. Config sample sections: `tests/resources/*.conf`.
 - Docker test builds target `linux/arm64` (buildx/QEMU required on x86 hosts). Dockerfile (opencv), Dockerfile-mjpeg, Dockerfile-dev (profiling tools).
 
 ## Non-obvious constraints
@@ -32,8 +32,8 @@ Working notes of the AI agent (test reports, plans). Read it in this order when
 picking up the MTProto work (or any future agent work) in a new session:
 
 1. `agent_workspace/README.md` — folder rules (most importantly: never write
-   secrets into it or anywhere tracked; real creds live only in git-ignored
-   `telegram_dev.conf`).
+   secrets into reports or anywhere tracked; real creds live only in
+   `agent_workspace/telegram_dev.conf`, covered by the folder ignore).
 2. `agent_workspace/roadmap.md` — current status, next steps, open questions.
 3. `agent_workspace/project_map.md` — one-line description of every project file,
    local-only files, branch layout.
