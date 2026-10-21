@@ -186,8 +186,11 @@ class _MTLMessage(TgMessage):
 
     @property
     def document(self) -> TgDocument | None:
-        if isinstance(self._message.file, types.Document):
-            return _MTLDocument(self._backend._client, self._message.file)  # noqa: SLF001
+        # Message.file returns Telethon's custom TelegramFile wrapper, while the
+        # raw TL document (with filename attributes) lives in message.media.
+        media = self._message.media
+        if isinstance(media, types.MessageMediaDocument):
+            return _MTLDocument(self._backend._client, media.document)  # noqa: SLF001
         return None
 
     @property
