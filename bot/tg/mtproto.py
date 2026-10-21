@@ -294,10 +294,8 @@ class _MTLMessage(TgMessage):
 
 
 class _MTLCallbackQuery(TgCallbackQuery):
-    def __init__(self, backend: MTProtoBackend, event: Any) -> None:
-        message: TgMessage | None = None
-        if event.message is not None:
-            message = _MTLMessage(backend, event.message)
+    def __init__(self, backend: MTProtoBackend, event: Any, tl_message: Any) -> None:
+        message: TgMessage | None = _MTLMessage(backend, tl_message) if tl_message is not None else None
         data = event.data.decode("utf-8", "replace") if event.data else None
         super().__init__(message, data)
         self._event = event
@@ -398,10 +396,20 @@ class MTProtoBackend(TelegramBackend):
             chat_username=chat_username,
         )
 
-    def _to_callback_update(self, event: Any) -> TgUpdate:
+    async def _to_callback_update(self, event: Any) -> TgUpdate:
+        # Unlike the Bot API, the callback update payload only carries chat/message
+        # ids, so the message the button belongs to has to be fetched separately.
+        tl_message = await event.get_message()
+        if tl_message is None:
+            with suppress(Exception):
+                updates = await self._client(functions.messages.RefetchMessagesRequest(id=[event.message_id]))
+                fetched = getattr(updates, "messages", [])
+                tl_message = fetched[0] if fetched else None
+        if tl_message is None:
+            logger.warning("Could not fetch message %s for callback query", event.message_id)
         return TgUpdate(
-            effective_message=_MTLMessage(self, event.message) if event.message is not None else None,
-            callback_query=_MTLCallbackQuery(self, event),
+            effective_message=_MTLMessage(self, tl_message) if tl_message is not None else None,
+            callback_query=_MTLCallbackQuery(self, event, tl_message),
             effective_chat_id=event.chat_id,
             chat_is_group=False,
             chat_username=None,
@@ -428,7 +436,7 @@ class MTProtoBackend(TelegramBackend):
         if handler is None:
             logger.debug("No callback handler matched query data: %s", data)
             return
-        await handler(self._to_callback_update(event))
+        await handler(await self._to_callback_update(event))
 
     async def send_message(
         self,
