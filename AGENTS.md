@@ -22,7 +22,10 @@ Klipper/Moonraker Telegram bot. Single Python app, no package structure: code li
 
 ## Architecture
 
-- `bot/main.py` wires everything in its `__main__` block into module-level globals (`config_wrap`, `klippy`, `notifier`, `timelapse`, `camera_wrap`, scheduler) that handlers reference directly — only pure functions there are unit-tested. It builds `Klippy`, a camera subclass chosen by `[camera] type` (default `mjpeg`; classes in `bot/camera.py`), `Timelapse`, `Notifier`, `WebSocketHelper` (Moonraker websocket), and a python-telegram-bot `Application` in polling mode.
+- `bot/main.py` wires everything in its `__main__` block into module-level globals (`config_wrap`, `klippy`, `notifier`, `timelapse`, `camera_wrap`, `ws_helper`, `tg_backend`, `a_scheduler`) that handlers reference directly — only pure functions there are unit-tested. It builds `Klippy`, a camera subclass chosen by `[camera] type` (default `mjpeg`; classes in `bot/camera.py`), `Timelapse`, `Notifier`, `WebSocketHelper` (Moonraker websocket), and the Telegram backend via `create_backend()` keyed on `[bot] api_type`: `BotApiBackend` (python-telegram-bot, polling — default) or `MTProtoBackend` (Telethon).
+- Telegram transport is isolated behind `bot/tg/`: `base.py` defines neutral types (`TgUpdate`, `TgMessage`, ...), the `TelegramBackend` ABC and `HandlerRegistry` (commands, callback patterns, document, catch-all, unknown_chat/unknown_chat guard). `main.py` registers all handlers into the registry; backends only map their library's events into `TgUpdate`. Never call PTB/Telethon APIs from `main.py` — go through `tg_backend`. `restart_bot()` = scheduler shutdown + SIGTERM to self (each backend's `run()` handles termination).
+- Data flow split: realtime print state and print control go over the Moonraker websocket (`ws_helper`); files/metadata/DB/power devices/versions go over Moonraker REST (`Klippy`). Outbound Telegram traffic has exactly one door: `tg_backend` (+ `telegram_helper.TelegramMessageRepr` for edit-in-place status messages).
+- Block diagrams of the whole system (startup, update routing, print lifecycle, gcode upload) live in `agent_workspace/architecture.md` (untracked — if missing, regenerate by reading the code).
 - Every new `telegram.conf` key must be added to `_KNOWN_ITEMS` of the section class in `bot/configuration.py`, otherwise it is reported as an unknown config field; sensitive values belong in `[secrets]`.
 - Async stack: asyncio (+ uvloop on non-Windows), websockets to Moonraker, jobs via apscheduler `AsyncIOScheduler`. ffmpeg (system binary) is required for the `ffmpeg` camera type and timelapse encoding.
 
@@ -37,7 +40,9 @@ picking up the MTProto work (or any future agent work) in a new session:
 2. `agent_workspace/roadmap.md` — current status, next steps, open questions.
 3. `agent_workspace/project_map.md` — one-line description of every project file,
    local-only files, branch layout.
-4. `agent_workspace/reports/` — dated test reports, newest first.
+4. `agent_workspace/architecture.md` — block diagrams: startup/transport choice,
+   update routing, print lifecycle, gcode upload, notification flow.
+5. `agent_workspace/reports/` — dated test reports, newest first.
 
 Keep the order up to date: after any significant test campaign add a report and
 update the roadmap; update project_map.md when files are added/renamed.
