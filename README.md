@@ -36,6 +36,11 @@ MTProto transport you can use an MTProxy server:
 mtproto_proxy: proxy-host:port:secret
 ```
 
+Note: MTProto bot login (`importBotAuthorization`) is rate-limited by Telegram.
+Starting the bot repeatedly in short bursts can result in a `FloodWaitError`
+and the bot will be unable to log in until the reported wait time has passed.
+This does not affect normal single restarts.
+
 ## Issues and bug reports
 
 We will be happy to assist you with any issues that you have, as long as you can form a coherent sentence and are polite in your requests.
