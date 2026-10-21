@@ -25,3 +25,19 @@ Klipper/Moonraker Telegram bot. Single Python app, no package structure: code li
 - `bot/main.py` wires everything in its `__main__` block into module-level globals (`config_wrap`, `klippy`, `notifier`, `timelapse`, `camera_wrap`, scheduler) that handlers reference directly — only pure functions there are unit-tested. It builds `Klippy`, a camera subclass chosen by `[camera] type` (default `mjpeg`; classes in `bot/camera.py`), `Timelapse`, `Notifier`, `WebSocketHelper` (Moonraker websocket), and a python-telegram-bot `Application` in polling mode.
 - Every new `telegram.conf` key must be added to `_KNOWN_ITEMS` of the section class in `bot/configuration.py`, otherwise it is reported as an unknown config field; sensitive values belong in `[secrets]`.
 - Async stack: asyncio (+ uvloop on non-Windows), websockets to Moonraker, jobs via apscheduler `AsyncIOScheduler`. ffmpeg (system binary) is required for the `ffmpeg` camera type and timelapse encoding.
+
+## Agent workspace (`agent_workspace/`, git-ignored)
+
+Working notes of the AI agent (test reports, plans). Read it in this order when
+picking up the MTProto work (or any future agent work) in a new session:
+
+1. `agent_workspace/README.md` — folder rules (most importantly: never write
+   secrets into it or anywhere tracked; real creds live only in git-ignored
+   `telegram_dev.conf`).
+2. `agent_workspace/roadmap.md` — current status, next steps, open questions.
+3. `agent_workspace/project_map.md` — one-line description of every project file,
+   local-only files, branch layout.
+4. `agent_workspace/reports/` — dated test reports, newest first.
+
+Keep the order up to date: after any significant test campaign add a report and
+update the roadmap; update project_map.md when files are added/renamed.
