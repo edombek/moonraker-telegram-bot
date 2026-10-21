@@ -202,6 +202,7 @@ class BotConfig(ConfigHelper):
         "api_hash",
         "http_proxy",
         "socks_proxy",
+        "mtproto_proxy",
         "debug",
         "log_parser",
         "power_device",
@@ -227,6 +228,7 @@ class BotConfig(ConfigHelper):
         self.max_upload_file_size: int = 50 if default_upload_size else 2000
         self.socks_proxy: str = self._get_str("socks_proxy", default="")
         self.http_proxy: str = self._get_str("http_proxy", default="")
+        self.mtproto_proxy: str = self._get_str("mtproto_proxy", default="")
         self.light_device_name: str = self._get_str("light_device", default="")
         self.poweroff_device_name: str = self._get_str("power_device", default="")
         self.debug: bool = self._get_boolean("debug", default=False)
@@ -252,6 +254,12 @@ class BotConfig(ConfigHelper):
                 self._parsing_errors.append("Option 'api_id': value is required when api_type is mtproto")
             if not re.fullmatch("[0-9a-fA-F]{32}", self.api_hash):
                 self._parsing_errors.append("Option 'api_hash': value must be a 32-character hex string when api_type is mtproto")
+
+        if self.mtproto_proxy:
+            if not re.fullmatch(r"[^:/\s]+:\d{1,5}:((dd|ee)[0-9a-fA-F]{32}|[0-9a-fA-F]{32}|[A-Za-z0-9+/=_-]{22,})", self.mtproto_proxy):
+                self._parsing_errors.append("Option 'mtproto_proxy': expected format is host:port:secret")
+            if self.api_type != "mtproto":
+                self._parsing_errors.append("Option 'mtproto_proxy': only usable when api_type is mtproto")
 
     @property
     def formatted_upload_path(self) -> str:
@@ -546,7 +554,7 @@ class ConfigWrapper:
 
     def dump_config_to_log(self) -> None:
         config_copy = copy.deepcopy(self._config)
-        for option in ("bot_token", "chat_id", "password", "api_token", "proxy_password", "api_hash"):
+        for option in ("bot_token", "chat_id", "password", "api_token", "proxy_password", "api_hash", "mtproto_proxy"):
             if config_copy.has_option("bot", option):
                 config_copy.set("bot", option, "<redacted>")
         for sec in config_copy.sections():

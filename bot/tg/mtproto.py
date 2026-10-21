@@ -12,7 +12,7 @@ from typing import IO, TYPE_CHECKING, Any, Callable
 import httpx
 from telethon import TelegramClient, events, functions, types  # type: ignore[import-untyped]
 from telethon.errors import RPCError  # type: ignore[import-untyped]
-from telethon.network import ConnectionTcpIntermediate  # type: ignore[import-untyped]
+from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyRandomizedIntermediate  # type: ignore[import-untyped]
 from telethon.sessions import StringSession  # type: ignore[import-untyped]
 
 from tg.base import (
@@ -335,9 +335,14 @@ class MTProtoBackend(TelegramBackend):
             auto_reconnect=True,
         )
 
-    def _build_proxy(self) -> tuple[Any, None]:
+    def _build_proxy(self) -> tuple[Any, Any]:
+        proxy_string = self._config.bot_config.mtproto_proxy
+        if proxy_string:
+            host, port, secret = proxy_string.rsplit(":", 2)
+            logger.info("MTProto backend: using MTProxy at %s:%s", host, port)
+            return ConnectionTcpMTProxyRandomizedIntermediate, (host, int(port), secret)
         if self._config.bot_config.socks_proxy or self._config.bot_config.http_proxy:
-            logger.warning("MTProto backend ignores socks_proxy/http_proxy (http backend only). Use a system-level MTProto/TCP tunnel if needed.")
+            logger.warning("MTProto backend ignores socks_proxy/http_proxy (http backend only). Use mtproto_proxy with a MTProxy server instead.")
         return ConnectionTcpIntermediate, None
 
     @property

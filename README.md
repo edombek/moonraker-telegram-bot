@@ -28,7 +28,13 @@ api_hash: 0123456789abcdef0123456789abcdef
 `api_id` and `api_hash` are obtained from [my.telegram.org](https://my.telegram.org)
 under API Development; the regular `bot_token` is used for the MTProto bot login.
 No session files are stored - the bot re-authenticates with the token on every start.
-The `http_proxy`/`socks_proxy` options apply to the HTTP transport only.
+The `http_proxy`/`socks_proxy` options apply to the HTTP transport only. For the
+MTProto transport you can use an MTProxy server:
+
+```ini
+[bot]
+mtproto_proxy: proxy-host:port:secret
+```
 
 ## Issues and bug reports
 
