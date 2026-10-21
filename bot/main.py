@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tarfile
 from typing import TYPE_CHECKING, Any, Final
-import urllib.parse
 from zipfile import ZipFile
 
 import aiofiles
@@ -31,30 +30,32 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[impo
 import emoji
 import httpx
 import orjson
-import telegram
-from telegram import (
-    BotCommand,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputMediaAudio,
-    InputMediaDocument,
-    InputMediaPhoto,
-    InputMediaVideo,
-    Message,
-    MessageEntity,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    Update,
-)
-from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest
-from telegram.ext import Application, CallbackContext, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from camera import Camera, FFmpegCamera, MjpegCamera, OpenCVCamera, RawStreamCamera
 from configuration import ConfigWrapper
 from klippy import Klippy, PowerDevice, PrintState
 from notifications import Notifier
 from telegram_helper import TelegramMessageRepr
+from tg import create_backend
+from tg.base import (
+    CallbackRegistration,
+    ChatAction,
+    CommandRegistration,
+    HandlerRegistry,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaKind,
+    ParseMode,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    TelegramBackend,
+    TgApiError,
+    TgBotCommand,
+    TgInputMedia,
+    TgMessage,
+    TgMessageEntity,
+    TgUpdate,
+)
 from timelapse import Timelapse
 from websocket_helper import WebSocketHelper
 
@@ -74,7 +75,8 @@ class SensitiveFormatter(logging.Formatter):
 
     @staticmethod
     def _filter(s: str) -> str:
-        return re.sub(r"\d{10}:[0-9A-Za-z_-]{35}", "**************", s)
+        s = re.sub(r"\d{10}:[0-9A-Za-z_-]{35}", "**************", s)
+        return re.sub(r"(api_hash[\"']?[:=]\s*)[0-9A-Za-z]{32}", r"\1**************", s, flags=re.IGNORECASE)
 
     def format(self, record: logging.LogRecord) -> str:
         original = logging.Formatter.format(self, record)
@@ -146,34 +148,35 @@ klippy: Klippy
 light_power_device: PowerDevice | None
 psu_power_device: PowerDevice | None
 ws_helper: WebSocketHelper
+tg_backend: TelegramBackend
 executors_pool: ThreadPoolExecutor = ThreadPoolExecutor(2, thread_name_prefix="bot_pool")
 
 
-async def echo_unknown(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
+async def echo_unknown(update: TgUpdate) -> None:
+    if update.effective_message is None:
         return
-    await update.message.reply_text(f"unknown command: {update.message.text}", do_quote=True)
+    await update.effective_message.reply_text(f"unknown command: {update.effective_message.text}", do_quote=True)
 
 
-async def unknown_chat(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat is None:
+async def unknown_chat(update: TgUpdate) -> None:
+    if update.effective_chat_id is None:
         logger.warning("Undefined effective chat")
         return
 
-    if update.effective_chat.id < 0 or update.effective_message is None:
+    if update.effective_chat_id < 0 or update.effective_message is None:
         return
 
-    mess = f"Unauthorized access detected with chat_id: {update.effective_chat.id}.\n<tg-spoiler>This incident will be reported.</tg-spoiler>"
+    mess = f"Unauthorized access detected with chat_id: {update.effective_chat_id}.\n<tg-spoiler>This incident will be reported.</tg-spoiler>"
     await update.effective_message.reply_text(
         mess,
         parse_mode=ParseMode.HTML,
         do_quote=True,
     )
-    logger.error("Unauthorized access detected from `%s` with chat_id `%s`. Message: %s", update.effective_chat.username, update.effective_chat.id, update.effective_message.to_json())
+    logger.error("Unauthorized access detected from `%s` with chat_id `%s`. Message: %s", update.chat_username, update.effective_chat_id, update.effective_message.to_json())
 
 
-async def status_no_confirm(effective_message: Message) -> None:
-    is_inline_button_press = effective_message.from_user is not None and effective_message.from_user.id == effective_message.get_bot().id
+async def status_no_confirm(effective_message: TgMessage) -> None:
+    is_inline_button_press = effective_message.sender_is_bot
     if klippy.printing and not config_wrap.notifications.group_only:
         notifier.update_status()
     else:
@@ -193,7 +196,7 @@ async def status_no_confirm(effective_message: Message) -> None:
             await message.send_as_reply(effective_message)
 
 
-async def status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def status(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -204,11 +207,11 @@ async def status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await status_no_confirm(update.effective_message)
 
 
-async def check_unfinished_lapses(bot: telegram.Bot) -> None:
+async def check_unfinished_lapses() -> None:
     files = timelapse.detect_unfinished_lapses()
     if not files:
         return
-    await bot.send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
+    await tg_backend.send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
     files_keys: list[list[InlineKeyboardButton]] = [[InlineKeyboardButton(text=el, callback_data=f"lapse:{hashlib.md5(el.encode()).hexdigest()}")] for el in files]
     files_keys.append(
         [
@@ -226,7 +229,7 @@ async def check_unfinished_lapses(bot: telegram.Bot) -> None:
             ),
         ],
     )
-    await bot.send_message(
+    await tg_backend.send_message(
         config_wrap.secrets.chat_id,
         text="Unfinished timelapses found\nBuild unfinished timelapse?",
         reply_markup=InlineKeyboardMarkup(files_keys),
@@ -234,11 +237,11 @@ async def check_unfinished_lapses(bot: telegram.Bot) -> None:
     )
 
 
-async def get_ip_no_confirm(effective_message: Message) -> None:
+async def get_ip_no_confirm(effective_message: TgMessage) -> None:
     await effective_message.reply_text(get_local_ip(), do_quote=True)
 
 
-async def get_ip(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def get_ip(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -249,16 +252,16 @@ async def get_ip(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await get_ip_no_confirm(update.effective_message)
 
 
-async def get_video_no_confirm(effective_message: Message) -> None:
+async def get_video_no_confirm(effective_message: TgMessage) -> None:
     if not camera_wrap.enabled:
         await effective_message.reply_text("camera is disabled", do_quote=True)
     else:
-        info_reply: Message = await effective_message.reply_text(
+        info_reply: TgMessage = await effective_message.reply_text(
             text="Starting video recording",
             disable_notification=notifier.silent_commands,
             do_quote=True,
         )
-        await effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.RECORD_VIDEO)
+        await effective_message.send_chat_action(ChatAction.RECORD_VIDEO)
 
         loop_loc = asyncio.get_running_loop()
         video_bio, thumb_bio, width, height = await loop_loc.run_in_executor(executors_pool, camera_wrap.take_video)
@@ -273,17 +276,16 @@ async def get_video_no_confirm(effective_message: Message) -> None:
                 width=width,
                 height=height,
                 caption="",
-                write_timeout=120,
                 disable_notification=notifier.silent_commands,
                 do_quote=True,
             )
-            await effective_message.get_bot().delete_message(chat_id=config_wrap.secrets.chat_id, message_id=info_reply.message_id)
+            await info_reply.delete()
 
         video_bio.close()
         thumb_bio.close()
 
 
-async def get_video(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def get_video(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -310,12 +312,12 @@ def confirm_keyboard(callback_mess: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-async def command_confirm_message(update: Update, text: str, callback_mess: str) -> None:
+async def command_confirm_message(update: TgUpdate, text: str, callback_mess: str) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
 
-    await update.effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
+    await update.effective_message.send_chat_action(ChatAction.TYPING)
     await update.effective_message.reply_text(
         text,
         reply_markup=confirm_keyboard(callback_mess),
@@ -324,12 +326,12 @@ async def command_confirm_message(update: Update, text: str, callback_mess: str)
     )
 
 
-async def command_confirm_message_ext(update: Update, command: str, confirm_text: str, exec_text: str, callback_mess: str, exec_func: Coroutine[Any, Any, None]) -> None:
+async def command_confirm_message_ext(update: TgUpdate, command: str, confirm_text: str, exec_text: str, callback_mess: str, exec_func: Coroutine[Any, Any, None]) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
 
-    await update.effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
+    await update.effective_message.send_chat_action(ChatAction.TYPING)
     if config_wrap.telegram_ui.is_present_in_require_confirmation(command) or config_wrap.telegram_ui.confirm_command():
         await update.effective_message.reply_text(
             confirm_text,
@@ -341,13 +343,13 @@ async def command_confirm_message_ext(update: Update, command: str, confirm_text
         await command_exec(effective_message=update.effective_message, exec_text=exec_text, exec_func=exec_func)
 
 
-async def command_exec(effective_message: Message, exec_text: str, exec_func: Coroutine[Any, Any, None]) -> None:
+async def command_exec(effective_message: TgMessage, exec_text: str, exec_func: Coroutine[Any, Any, None]) -> None:
     if exec_text is not None:
         await effective_message.reply_text(exec_text, do_quote=True)
     await exec_func
 
 
-async def pause_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
+async def pause_printing(update: TgUpdate) -> None:
     await command_confirm_message_ext(
         update=update,
         command="pause",
@@ -358,7 +360,7 @@ async def pause_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def resume_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
+async def resume_printing(update: TgUpdate) -> None:
     await command_confirm_message_ext(
         update=update,
         command="resume",
@@ -369,7 +371,7 @@ async def resume_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-async def cancel_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
+async def cancel_printing(update: TgUpdate) -> None:
     await command_confirm_message_ext(
         update=update,
         command="cancel",
@@ -380,7 +382,7 @@ async def cancel_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-async def emergency_stop(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def emergency_stop(update: TgUpdate) -> None:
     await command_confirm_message_ext(
         update=update,
         command="emergency",
@@ -391,7 +393,7 @@ async def emergency_stop(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def firmware_restart(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def firmware_restart(update: TgUpdate) -> None:
     await command_confirm_message_ext(
         update=update,
         command="fw_restart",
@@ -402,7 +404,7 @@ async def firmware_restart(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-async def shutdown_host(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def shutdown_host(update: TgUpdate) -> None:
     await command_confirm_message_ext(
         update=update,
         command="shutdown",
@@ -413,11 +415,11 @@ async def shutdown_host(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def reboot_host(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def reboot_host(update: TgUpdate) -> None:
     await command_confirm_message_ext(update=update, command="reboot", confirm_text="Reboot host?", exec_text="Rebooting host", callback_mess="reboot_host", exec_func=ws_helper.reboot_pi_host())
 
 
-async def bot_restart(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def bot_restart(update: TgUpdate) -> None:
     await command_confirm_message_ext(update=update, command="bot_restart", confirm_text="Restart bot?", exec_text="Restarting bot", callback_mess="bot_restart", exec_func=restart_bot())
 
 
@@ -474,7 +476,7 @@ def prepare_log_files() -> tuple[list[str], bool, str | None]:
     return ["telegram.log", "crowsnest.log", "moonraker.log", "klippy.log", "KlipperScreen.log", "dmesg.txt", "debug.txt"], dmesg_success, dmesg_error
 
 
-async def send_logs_no_confirm(effective_message: Message) -> None:
+async def send_logs_no_confirm(effective_message: TgMessage) -> None:
 
     resp_message = await effective_message.reply_text(
         "Collecting logs",
@@ -483,7 +485,7 @@ async def send_logs_no_confirm(effective_message: Message) -> None:
     )
 
     log_dir = config_wrap.bot_config.log_file.parent
-    logs_list: list[InputMediaAudio | InputMediaDocument | InputMediaPhoto | InputMediaVideo] = []
+    logs_list: list[TgInputMedia] = []
     for log_file in prepare_log_files()[0]:
         try:
             log_file_path = log_dir / log_file
@@ -492,7 +494,7 @@ async def send_logs_no_confirm(effective_message: Message) -> None:
                     content = await fh.read()
                     if len(content) > 0:
                         logger.debug("adding log file: %s", log_file)
-                        logs_list.append(InputMediaDocument(content, filename=log_file))
+                        logs_list.append(TgInputMedia(InputMediaKind.DOCUMENT, content, filename=log_file))
                     else:
                         logger.debug("skipping empty log file: %s", log_file)
         except FileNotFoundError as err:  # noqa: PERF203
@@ -500,14 +502,14 @@ async def send_logs_no_confirm(effective_message: Message) -> None:
 
     if logs_list:
         await resp_message.edit_text("Uploading logs")
-        await effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
-        await effective_message.reply_media_group(logs_list, disable_notification=notifier.silent_commands, do_quote=True, write_timeout=120)
+        await effective_message.send_chat_action(ChatAction.UPLOAD_DOCUMENT)
+        await effective_message.reply_media_group(logs_list, disable_notification=notifier.silent_commands, do_quote=True)
         await resp_message.edit_text(text=f"{await klippy.get_versions_info()}\nUpload logs to analyzer /logs_upload")
     else:
         await resp_message.edit_text(text=f"No logs found in log_path `{config_wrap.bot_config.log_file.parent}`")
 
 
-async def send_logs(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def send_logs(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -518,7 +520,7 @@ async def send_logs(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await send_logs_no_confirm(update.effective_message)
 
 
-async def upload_logs_no_confirm(effective_message: Message) -> None:
+async def upload_logs_no_confirm(effective_message: TgMessage) -> None:
     resp_message = await effective_message.reply_text(
         "Collecting logs",
         disable_notification=notifier.silent_commands,
@@ -543,7 +545,7 @@ async def upload_logs_no_confirm(effective_message: Message) -> None:
                 tar.add(file_path, arcname=file)
 
     await resp_message.edit_text("Uploading logs to parser")
-    await effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+    await effective_message.send_chat_action(ChatAction.UPLOAD_DOCUMENT)
 
     async with aiofiles.open(config_wrap.bot_config.log_file.parent / "logs.tar.xz", "rb") as log_archive_ojb, httpx.AsyncClient() as client_loc:
         resp = await client_loc.post(url="https://coderus.openrepos.net/klipper_logs", files={"tarfile": await log_archive_ojb.read()}, follow_redirects=False, timeout=25)
@@ -556,7 +558,7 @@ async def upload_logs_no_confirm(effective_message: Message) -> None:
             await resp_message.edit_text(f"Logs upload failed `{resp.status_code}`")
 
 
-async def upload_logs(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def upload_logs(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -574,8 +576,8 @@ async def restart_bot() -> None:
     os.kill(main_pid, signal.SIGTERM)
 
 
-async def power_toggle_no_confirm(effective_message: Message) -> None:
-    await effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
+async def power_toggle_no_confirm(effective_message: TgMessage) -> None:
+    await effective_message.send_chat_action(ChatAction.TYPING)
     if psu_power_device:
         await effective_message.reply_text(
             "Power " + ("Off" if psu_power_device.device_state else "On") + " printer?",
@@ -591,7 +593,7 @@ async def power_toggle_no_confirm(effective_message: Message) -> None:
         )
 
 
-async def power_toggle(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def power_toggle(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -602,7 +604,7 @@ async def power_toggle(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await power_toggle_no_confirm(update.effective_message)
 
 
-async def light_toggle_no_confirm(effective_message: Message) -> None:
+async def light_toggle_no_confirm(effective_message: TgMessage) -> None:
     if light_power_device:
         mess = f"Device `{light_power_device.name}` toggled " + ("on" if await light_power_device.toggle_device() else "off")
         if light_power_device.device_error:
@@ -621,7 +623,7 @@ async def light_toggle_no_confirm(effective_message: Message) -> None:
         )
 
 
-async def light_toggle(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def light_toggle(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -632,13 +634,13 @@ async def light_toggle(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await light_toggle_no_confirm(update.effective_message)
 
 
-async def button_lapse_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def button_lapse_handler(update: TgUpdate) -> None:
     if update.effective_message is None or update.callback_query is None:
         logger.warning("Undefined effective message or callback query")
         return
     query = update.callback_query
-    if query.message is None or not query.message.is_accessible or not isinstance(query.message, Message):
-        logger.error("Undefined callback_query.message for %s", query.to_json())
+    if query.message is None:
+        logger.error("Undefined callback_query.message for query %s", query.data)
         return
     if query.message.reply_markup is None:
         logger.error("Undefined query.message.reply_markup in %s", query.message.to_json())
@@ -651,29 +653,30 @@ async def button_lapse_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         ),
     )[0].text
 
-    info_mess: Message = await context.bot.send_message(
+    info_mess: TgMessage = await tg_backend.send_message(
         chat_id=config_wrap.secrets.chat_id,
         text=f"Starting time-lapse assembly for {lapse_name}",
         disable_notification=notifier.silent_commands,
     )
-    await context.bot.send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.RECORD_VIDEO)
+    await tg_backend.send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.RECORD_VIDEO)
     await timelapse.upload_timelapse(lapse_name, info_mess)
     await query.delete_message()
-    await check_unfinished_lapses(context.bot)
+    await check_unfinished_lapses()
 
 
-async def print_file_dialog_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def print_file_dialog_handler(update: TgUpdate) -> None:
     if update.effective_message is None or update.callback_query is None:
         logger.warning("Undefined effective message or callback query")
         return
     query = update.callback_query
-    if query.message is None or not query.message.is_accessible or not isinstance(query.message, Message):
-        logger.error("Undefined callback_query.message for %s", query.to_json())
+    if query.message is None:
+        logger.error("Undefined callback_query.message for query %s", query.data)
         return
     if query.message.reply_markup is None:
         logger.error("Undefined query.message.reply_markup in %s", query.message.to_json())
         return
-    if update.effective_message.reply_to_message is None:
+    replied = await update.effective_message.get_reply_message()
+    if replied is None:
         logger.error("Undefined reply_to_message for %s", update.effective_message.to_json())
         return
     keyboard_keys = {x["callback_data"]: x["text"] for x in itertools.chain.from_iterable(query.message.reply_markup.to_dict()["inline_keyboard"])}
@@ -692,19 +695,19 @@ async def print_file_dialog_handler(update: Update, context: ContextTypes.DEFAUL
     ]
     start_pre_mess = "Start printing file:"
     message, bio = await klippy.get_file_info_by_name(pri_filename, f"{start_pre_mess}{pri_filename}?")
-    await update.effective_message.reply_to_message.reply_photo(
+    await replied.reply_photo(
         photo=bio,
         caption=message,
         reply_markup=InlineKeyboardMarkup(keyboard),
         disable_notification=notifier.silent_commands,
         do_quote=True,
-        caption_entities=[MessageEntity(type="bold", offset=len(start_pre_mess), length=len(pri_filename))],
+        caption_entities=[TgMessageEntity(type="bold", offset=len(start_pre_mess), length=len(pri_filename))],
     )
     bio.close()
-    await context.bot.delete_message(update.effective_message.chat_id, update.effective_message.message_id)
+    await tg_backend.delete_message(update.effective_message.chat_id, update.effective_message.message_id)
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def button_handler(update: TgUpdate) -> None:
     if update.effective_message is None or update.callback_query is None:
         logger.warning("Undefined effective message or callback query")
         return
@@ -713,26 +716,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     delete_query = True
 
-    if query.message is None or not query.message.is_accessible or not isinstance(query.message, Message):
-        logger.error("Undefined callback_query.message for %s", query.to_json())
+    if query.message is None:
+        logger.error("Undefined callback_query.message for query %s", query.data)
         return
 
     if query.data is None:
-        logger.error("Undefined callback_query.data for %s", query.to_json())
+        logger.error("Undefined callback_query.data for query")
         return
 
     if "updstatus" not in query.data:
-        await context.bot.send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
+        await tg_backend.send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
 
     await query.answer()
+    reply_to_message = await update.effective_message.get_reply_message()
     if query.data == "do_nothing":
-        if update.effective_message.reply_to_message:
-            await context.bot.delete_message(
+        if reply_to_message:
+            await tg_backend.delete_message(
                 update.effective_message.chat_id,
-                update.effective_message.reply_to_message.message_id,
+                reply_to_message.message_id,
             )
     elif query.data == "cleanup_timelapse_unfinished":
-        await context.bot.send_message(chat_id=config_wrap.secrets.chat_id, text="Removing unfinished timelapses data")
+        await tg_backend.send_message(chat_id=config_wrap.secrets.chat_id, text="Removing unfinished timelapses data")
         timelapse.cleanup_unfinished_lapses()
     elif "gcode:" in query.data:
         await ws_helper.execute_ws_gcode_script(query.data.replace("gcode:", ""))
@@ -740,27 +744,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif "updstatus" in query.data:
         await status_no_confirm(update.effective_message)
         delete_query = False
-    elif update.effective_message.reply_to_message is None:
+    elif reply_to_message is None:
         logger.error("Undefined reply_to_message for %s", update.effective_message.to_json())
     elif query.data == "emergency_stop":
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text="Executing emergency stop", exec_func=ws_helper.emergency_stop_printer())
+        await command_exec(effective_message=reply_to_message, exec_text="Executing emergency stop", exec_func=ws_helper.emergency_stop_printer())
     elif query.data == "firmware_restart":
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text="Restarting klipper firmware", exec_func=ws_helper.firmware_restart_printer())
+        await command_exec(effective_message=reply_to_message, exec_text="Restarting klipper firmware", exec_func=ws_helper.firmware_restart_printer())
     elif query.data == "cancel_printing":
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text="Canceling printing", exec_func=ws_helper.manage_printing("cancel"))
+        await command_exec(effective_message=reply_to_message, exec_text="Canceling printing", exec_func=ws_helper.manage_printing("cancel"))
     elif query.data == "pause_printing":
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text="Pausing printing", exec_func=ws_helper.manage_printing("pause"))
+        await command_exec(effective_message=reply_to_message, exec_text="Pausing printing", exec_func=ws_helper.manage_printing("pause"))
     elif query.data == "resume_printing":
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text="Resuming printing", exec_func=ws_helper.manage_printing("resume"))
+        await command_exec(effective_message=reply_to_message, exec_text="Resuming printing", exec_func=ws_helper.manage_printing("resume"))
     elif query.data == "shutdown_host":
         await query.delete_message()
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text="Shutting down host", exec_func=ws_helper.shutdown_pi_host())
+        await command_exec(effective_message=reply_to_message, exec_text="Shutting down host", exec_func=ws_helper.shutdown_pi_host())
     elif query.data == "reboot_host":
         await query.delete_message()
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text="Rebooting host", exec_func=ws_helper.reboot_pi_host())
+        await command_exec(effective_message=reply_to_message, exec_text="Rebooting host", exec_func=ws_helper.reboot_pi_host())
     elif query.data == "bot_restart":
         await query.delete_message()
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text="Restarting bot", exec_func=restart_bot())
+        await command_exec(effective_message=reply_to_message, exec_text="Restarting bot", exec_func=restart_bot())
     elif query.data == "power_off_printer":
         if psu_power_device is None:
             return
@@ -769,7 +773,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             mess = f"Device `{psu_power_device.name}` failed to toggle off\nError: {psu_power_device.device_error}"
         else:
             mess = f"Device `{psu_power_device.name}` toggled off"
-        await update.effective_message.reply_to_message.reply_text(
+        await reply_to_message.reply_text(
             mess,
             parse_mode=ParseMode.HTML,
             do_quote=True,
@@ -782,14 +786,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             mess = f"Device `{psu_power_device.name}` failed to toggle on\nError: {psu_power_device.device_error}"
         else:
             mess = f"Device `{psu_power_device.name}` toggled on"
-        await update.effective_message.reply_to_message.reply_text(
+        await reply_to_message.reply_text(
             mess,
             parse_mode=ParseMode.HTML,
             do_quote=True,
         )
     elif "macro:" in query.data:
         command = query.data.replace("macro:", "")
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text=f"Running macro: {command}", exec_func=ws_helper.execute_ws_gcode_script(command))
+        await command_exec(effective_message=reply_to_message, exec_text=f"Running macro: {command}", exec_func=ws_helper.execute_ws_gcode_script(command))
     elif "macroc:" in query.data:
         command = query.data.replace("macroc:", "")
         await query.edit_message_text(
@@ -806,9 +810,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         delete_query = False
     elif "print_file" in query.data:
         if query.message.caption:
-            filename = query.message.parse_caption_entity(query.message.caption_entities[0]).strip()
+            filename = query.message.extract_entity_text(query.message.caption_entities[0], caption=True)
         else:
-            filename = query.message.parse_entity(query.message.entities[0]).strip()
+            filename = query.message.extract_entity_text(query.message.entities[0])
         if await klippy.start_printing_file(filename):
             delete_query = True
         else:
@@ -826,27 +830,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         delete_query = False
     elif "rstrt_srv:" in query.data:
         service_name = query.data.replace("rstrt_srv:", "")
-        await command_exec(effective_message=update.effective_message.reply_to_message, exec_text=f"Restarting service: {service_name}", exec_func=ws_helper.restart_system_service(service_name))
+        await command_exec(effective_message=reply_to_message, exec_text=f"Restarting service: {service_name}", exec_func=ws_helper.restart_system_service(service_name))
     elif "logs_upload:" in query.data:
-        await upload_logs_no_confirm(update.effective_message.reply_to_message)
+        await upload_logs_no_confirm(reply_to_message)
     elif "send_logs:" in query.data:
-        await send_logs_no_confirm(update.effective_message.reply_to_message)
+        await send_logs_no_confirm(reply_to_message)
     elif "files:" in query.data:
-        await get_gcode_files_no_confirm(update.effective_message.reply_to_message)
+        await get_gcode_files_no_confirm(reply_to_message)
     elif "services:" in query.data:
-        await services_keyboard_no_confirm(update.effective_message.reply_to_message)
+        await services_keyboard_no_confirm(reply_to_message)
     elif "macros:" in query.data:
-        await get_macros_no_confirm(update.effective_message.reply_to_message)
+        await get_macros_no_confirm(reply_to_message)
     elif "help:" in query.data:
-        await help_command_no_confirm(update.effective_message.reply_to_message)
+        await help_command_no_confirm(reply_to_message)
     elif "status:" in query.data:
-        await status_no_confirm(update.effective_message.reply_to_message)
+        await status_no_confirm(reply_to_message)
     elif "ip:" in query.data:
-        await get_ip_no_confirm(update.effective_message.reply_to_message)
+        await get_ip_no_confirm(reply_to_message)
     elif "power_toggle:" in query.data:
-        await power_toggle_no_confirm(update.effective_message.reply_to_message)
+        await power_toggle_no_confirm(reply_to_message)
     elif "light_toggle:" in query.data:
-        await light_toggle_no_confirm(update.effective_message.reply_to_message)
+        await light_toggle_no_confirm(reply_to_message)
     else:
         logger.debug("unknown message from inline keyboard query: %s", query.data)
 
@@ -854,8 +858,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.delete_message()
 
 
-async def get_gcode_files_no_confirm(effective_message: Message) -> None:
-    await effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
+async def get_gcode_files_no_confirm(effective_message: TgMessage) -> None:
+    await effective_message.send_chat_action(ChatAction.TYPING)
     await effective_message.reply_text(
         "Gcode files to print:",
         reply_markup=await gcode_files_keyboard(),
@@ -864,7 +868,7 @@ async def get_gcode_files_no_confirm(effective_message: Message) -> None:
     )
 
 
-async def get_gcode_files(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def get_gcode_files(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -915,7 +919,7 @@ async def gcode_files_keyboard(offset: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(files_keys)
 
 
-async def services_keyboard_no_confirm(effective_message: Message) -> None:
+async def services_keyboard_no_confirm(effective_message: TgMessage) -> None:
     def create_service_button(element: str) -> list[InlineKeyboardButton]:
         return [
             InlineKeyboardButton(
@@ -927,7 +931,7 @@ async def services_keyboard_no_confirm(effective_message: Message) -> None:
     services = config_wrap.bot_config.services
     service_keys: list[list[InlineKeyboardButton]] = list(map(create_service_button, services))
 
-    await effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
+    await effective_message.send_chat_action(ChatAction.TYPING)
     await effective_message.reply_text(
         "Services to operate:",
         reply_markup=InlineKeyboardMarkup(service_keys),
@@ -936,7 +940,7 @@ async def services_keyboard_no_confirm(effective_message: Message) -> None:
     )
 
 
-async def services_keyboard(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def services_keyboard(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -947,7 +951,7 @@ async def services_keyboard(update: Update, _: ContextTypes.DEFAULT_TYPE) -> Non
         await services_keyboard_no_confirm(update.effective_message)
 
 
-async def exec_gcode(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def exec_gcode(update: TgUpdate) -> None:
     # maybe use context.args
     if update.effective_message is None or update.effective_message.text is None:
         logger.warning("Undefined effective message or text")
@@ -963,8 +967,8 @@ async def exec_gcode(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("No command provided", do_quote=True)
 
 
-async def get_macros_no_confirm(effective_message: Message) -> None:
-    await effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.TYPING)
+async def get_macros_no_confirm(effective_message: TgMessage) -> None:
+    await effective_message.send_chat_action(ChatAction.TYPING)
     files_keys: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
@@ -983,7 +987,7 @@ async def get_macros_no_confirm(effective_message: Message) -> None:
     )
 
 
-async def get_macros(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def get_macros(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -994,7 +998,7 @@ async def get_macros(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await get_macros_no_confirm(update.effective_message)
 
 
-async def macros_handler(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def macros_handler(update: TgUpdate) -> None:
     if not update.effective_message or update.effective_message.text is None:
         logger.warning("Undefined effective message or update.effective_message.text")
         return
@@ -1016,15 +1020,15 @@ async def macros_handler(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
                 do_quote=True,
             )
     else:
-        await echo_unknown(update, _)
+        await echo_unknown(update)
 
 
-async def upload_file(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def upload_file(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
 
-    await update.effective_message.get_bot().send_chat_action(chat_id=config_wrap.secrets.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+    await update.effective_message.send_chat_action(ChatAction.UPLOAD_DOCUMENT)
     doc = update.effective_message.document
     if doc is None or doc.file_name is None:
         await update.effective_message.reply_text(
@@ -1043,15 +1047,14 @@ async def upload_file(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        file_byte_array = await (await doc.get_file()).download_as_bytearray()
-    except BadRequest as badreq:
+        file_byte_array = await doc.download()
+    except TgApiError as badreq:
         await update.effective_message.reply_text(
-            f"Bad request: {badreq.message}",
+            f"Bad request: {badreq}",
             disable_notification=notifier.silent_commands,
             do_quote=True,
         )
         return
-
     # TODO: add context management!
     uploaded_bio = BytesIO()
     uploaded_bio.name = doc.file_name
@@ -1123,11 +1126,11 @@ async def upload_file(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 disable_notification=notifier.silent_commands,
                 do_quote=True,
-                caption_entities=[MessageEntity(type="bold", offset=len(start_pre_mess), length=len(f"{config_wrap.bot_config.formatted_upload_path}{sending_bio.name}"))],
+                caption_entities=[TgMessageEntity(type="bold", offset=len(start_pre_mess), length=len(f"{config_wrap.bot_config.formatted_upload_path}{sending_bio.name}"))],
             )
             thumb.close()
             # TODO: delete uploaded file
-            # bot.delete_message(update.effective_message.chat_id, update.effective_message.message_id)
+            # tg_backend.delete_message(update.effective_message.chat_id, update.effective_message.message_id)
         else:
             await update.effective_message.reply_text(
                 f"Failed uploading file: {sending_bio.name}",
@@ -1137,10 +1140,6 @@ async def upload_file(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
     uploaded_bio.close()
     sending_bio.close()
-
-
-def bot_error_handler(_: object, context: CallbackContext) -> None:  # type: ignore[type-arg]
-    logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
 
 def create_keyboard() -> list[list[str]]:
@@ -1187,12 +1186,12 @@ def bot_commands() -> dict[str, str]:
     return {c: a for c, a in commands.items() if c not in config_wrap.telegram_ui.hidden_bot_commands}
 
 
-async def help_command_no_confirm(effective_message: Message) -> None:
+async def help_command_no_confirm(effective_message: TgMessage) -> None:
     ## TODO: [fixme] escape symbols???  from telegram.utils.helpers import escape
     mess = (
         await klippy.get_versions_info(bot_only=True)
         + ("\n".join([f"/{c} - {a}" for c, a in bot_commands().items()]))
-        + '\n\nPlease refer to the <a href="https://github.com/nlef/moonraker-telegram-bot/wiki">wiki</a> for additional information'
+        + '\n\nPlease refer to the <a href="https://github.com/nlef/moonraker-telegram-bot/wiki">wiki</a>'
     )
     await effective_message.reply_text(
         text=mess,
@@ -1201,7 +1200,7 @@ async def help_command_no_confirm(effective_message: Message) -> None:
     )
 
 
-async def help_command(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: TgUpdate) -> None:
     if update.effective_message is None:
         logger.warning("Undefined effective message")
         return
@@ -1212,29 +1211,24 @@ async def help_command(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await help_command_no_confirm(update.effective_message)
 
 
-def prepare_command(macro: str) -> BotCommand | None:
+def prepare_command(macro: str) -> TgBotCommand | None:
     if re.match("^[a-zA-Z0-9_]{1,32}$", macro):
-        try:
-            return BotCommand(macro.lower(), macro)
-        except Exception:
-            logger.exception("Bad macro name '%s'", macro)
-            return None
-    else:
-        logger.warning("Bad macro name '%s'", macro)
-        return None
+        return TgBotCommand(macro.lower(), macro)
+    logger.warning("Bad macro name '%s'", macro)
+    return None
 
 
-def prepare_commands_list(macros: list[str], add_macros: bool) -> list[Any]:
-    commands = list(bot_commands().items())
+def prepare_commands_list(macros: list[str], add_macros: bool) -> list[TgBotCommand]:
+    commands: list[TgBotCommand] = [TgBotCommand(name, description) for name, description in bot_commands().items()]
     if add_macros:
-        commands += list(filter(lambda el: el, map(prepare_command, macros)))  # type: ignore[arg-type]
+        commands += list(filter(None, map(prepare_command, macros)))
         if len(commands) >= _MAX_BOT_COMMANDS:
             logger.warning("Commands list too large!")
             commands = commands[0 : _MAX_BOT_COMMANDS - 1]
     return commands
 
 
-async def greeting_message(bot: telegram.Bot) -> None:
+async def greeting_message() -> None:
     if config_wrap.secrets.chat_id == 0:
         return
 
@@ -1249,7 +1243,7 @@ async def greeting_message(bot: telegram.Bot) -> None:
                 mess += "\n" + await klippy.get_versions_info(bot_only=True) + config_wrap.configuration_errors
 
         use_keyboard = config_wrap.telegram_ui.send_reply_keyboard
-        await bot.send_message(
+        await tg_backend.send_message(
             config_wrap.secrets.chat_id,
             text=mess,
             parse_mode=ParseMode.HTML,
@@ -1257,9 +1251,9 @@ async def greeting_message(bot: telegram.Bot) -> None:
             reply_markup=ReplyKeyboardMarkup(create_keyboard(), resize_keyboard=True) if use_keyboard else ReplyKeyboardRemove(),
         )
 
-    await bot.set_my_commands(commands=prepare_commands_list(await klippy.get_macros_force(), config_wrap.telegram_ui.include_macros_in_command_list))
+    await tg_backend.set_my_commands(prepare_commands_list(await klippy.get_macros_force(), config_wrap.telegram_ui.include_macros_in_command_list))
     await klippy.add_bot_announcements_feed()
-    await check_unfinished_lapses(bot)
+    await check_unfinished_lapses()
 
 
 def get_local_ip() -> str:
@@ -1274,91 +1268,58 @@ def get_local_ip() -> str:
     return ip_address
 
 
-def start_bot(config: ConfigWrapper) -> Application:  # type: ignore[type-arg]
-    app_builder = Application.builder()
-    (
-        app_builder.base_url(config.bot_config.api_url)
-        .connection_pool_size(265)
-        .pool_timeout(1)
-        .connect_timeout(10)
-        .read_timeout(45)
-        .write_timeout(60)
-        .media_write_timeout(240)
-        .concurrent_updates(2)
-        .get_updates_connection_pool_size(4)
-        .get_updates_pool_timeout(1)
-        .get_updates_connect_timeout(10)
-        .get_updates_read_timeout(45)
-        .get_updates_write_timeout(60)
-        .token(config.secrets.token)
-    )
+def start_bot(config: ConfigWrapper) -> TelegramBackend:
+    """Build the configured Telegram backend and wire the neutral handler registry."""
+    backend = create_backend(config)
 
-    if config.secrets.proxy_login and config.secrets.proxy_password:
-        proxy_creds = f"{urllib.parse.quote(config.secrets.proxy_login, safe='')}:{urllib.parse.quote(config.secrets.proxy_password, safe='')}@"
-    else:
-        proxy_creds = ""
+    registry = HandlerRegistry(unknown_chat=unknown_chat)
+    registry.callbacks = [
+        CallbackRegistration(re.compile("lapse:"), button_lapse_handler),
+        CallbackRegistration(re.compile("^\\S[^\\:]+\\.gcode$"), print_file_dialog_handler),
+        CallbackRegistration(None, button_handler),
+    ]
+    registry.commands = [
+        CommandRegistration("help", help_command, parallel=True),
+        CommandRegistration("status", status, parallel=True),
+        CommandRegistration("ip", get_ip),
+        CommandRegistration("video", get_video),
+        CommandRegistration("pause", pause_printing),
+        CommandRegistration("resume", resume_printing),
+        CommandRegistration("cancel", cancel_printing),
+        CommandRegistration("power", power_toggle),
+        CommandRegistration("light", light_toggle),
+        CommandRegistration("emergency", emergency_stop),
+        CommandRegistration("shutdown", shutdown_host),
+        CommandRegistration("reboot", reboot_host),
+        CommandRegistration("bot_restart", bot_restart),
+        CommandRegistration("fw_restart", firmware_restart),
+        CommandRegistration("services", services_keyboard),
+        CommandRegistration("files", get_gcode_files, parallel=True),
+        CommandRegistration("macros", get_macros, parallel=True),
+        CommandRegistration("gcode", exec_gcode, parallel=True),
+        CommandRegistration("logs", send_logs, parallel=True),
+        CommandRegistration("logs_upload", upload_logs, parallel=True),
+    ]
+    registry.catch_all_command = macros_handler
+    registry.document = upload_file
+    registry.unknown_text = echo_unknown
 
-    proxy_uri = ""
-
-    if config.bot_config.socks_proxy:
-        proxy_uri = f"socks5://{proxy_creds}{config.bot_config.socks_proxy}"
-
-    if config.bot_config.http_proxy:
-        proxy_uri = f"http://{proxy_creds}{config.bot_config.http_proxy}"
-
-    if proxy_uri:
-        app_builder.proxy(proxy_uri).get_updates_proxy(proxy_uri)
-
-    application = app_builder.build()
-
-    application.add_handler(MessageHandler(~filters.Chat(config.secrets.chat_id), unknown_chat))
-
-    application.add_handler(CallbackQueryHandler(button_lapse_handler, pattern="lapse:"))
-    application.add_handler(CallbackQueryHandler(print_file_dialog_handler, pattern=re.compile("^\\S[^\\:]+\\.gcode$")))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(CommandHandler("help", help_command, block=False))
-    application.add_handler(CommandHandler("status", status, block=False))
-    application.add_handler(CommandHandler("ip", get_ip))
-    application.add_handler(CommandHandler("video", get_video))
-    application.add_handler(CommandHandler("pause", pause_printing))
-    application.add_handler(CommandHandler("resume", resume_printing))
-    application.add_handler(CommandHandler("cancel", cancel_printing))
-    application.add_handler(CommandHandler("power", power_toggle))
-    application.add_handler(CommandHandler("light", light_toggle))
-    application.add_handler(CommandHandler("emergency", emergency_stop))
-    application.add_handler(CommandHandler("shutdown", shutdown_host))
-    application.add_handler(CommandHandler("reboot", reboot_host))
-    application.add_handler(CommandHandler("bot_restart", bot_restart))
-    application.add_handler(CommandHandler("fw_restart", firmware_restart))
-    application.add_handler(CommandHandler("services", services_keyboard))
-    application.add_handler(CommandHandler("files", get_gcode_files, block=False))
-    application.add_handler(CommandHandler("macros", get_macros, block=False))
-    application.add_handler(CommandHandler("gcode", exec_gcode, block=False))
-    application.add_handler(CommandHandler("logs", send_logs, block=False))
-    application.add_handler(CommandHandler("logs_upload", upload_logs, block=False))
-
-    application.add_handler(MessageHandler(filters.COMMAND, macros_handler, block=False))
-
-    application.add_handler(MessageHandler(filters.Document.ALL & (~filters.COMMAND), upload_file, block=False))
-
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), echo_unknown))
-
-    application.add_error_handler(bot_error_handler)  # type: ignore[arg-type]
-
-    return application
+    backend.setup(registry)
+    return backend
 
 
-async def start_scheduler(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _start_scheduler_async() -> None:
     await klippy.async_init()
     a_scheduler.start()
-    a_scheduler.add_job(
-        greeting_message,
-        # kwargs={"bot": bot_updater.bot},
-        kwargs={"bot": context.bot},
-    )
-    # bot_updater.create_task(ws_helper.run_forever_async())
-    loop = asyncio.get_event_loop()
+    a_scheduler.add_job(greeting_message)
+    loop = asyncio.get_running_loop()
     loop.create_task(ws_helper.run_forever_async())  # noqa: RUF006
+
+
+def start_scheduler() -> None:
+    """Backend-ready callback: kick off moonraker init, scheduler job and websocket."""
+    loop = asyncio.get_running_loop()
+    loop.create_task(_start_scheduler_async())  # noqa: RUF006
 
 
 if __name__ == "__main__":
@@ -1428,15 +1389,11 @@ if __name__ == "__main__":
         camera_wrap = RawStreamCamera(config_wrap, klippy, rotating_handler)
     else:
         camera_wrap = OpenCVCamera(config_wrap, klippy, rotating_handler)
-    bot_updater = start_bot(config_wrap)
-    timelapse = Timelapse(config_wrap, klippy, camera_wrap, a_scheduler, bot_updater.bot, rotating_handler)
-    notifier = Notifier(config_wrap, bot_updater.bot, klippy, camera_wrap, a_scheduler, rotating_handler)
+
+    tg_backend = start_bot(config_wrap)
+    timelapse = Timelapse(config_wrap, klippy, camera_wrap, a_scheduler, tg_backend, rotating_handler)
+    notifier = Notifier(config_wrap, tg_backend, klippy, camera_wrap, a_scheduler, rotating_handler)
 
     ws_helper = WebSocketHelper(config_wrap, klippy, notifier, timelapse, a_scheduler, rotating_handler)
 
-    if bot_updater.job_queue is None:
-        raise RuntimeError("job_queue is not initialized")
-    bot_updater.job_queue.run_once(start_scheduler, 1)
-    bot_updater.run_polling(allowed_updates=Update.ALL_TYPES)
-
-    logger.info("Shutting down the bot")
+    tg_backend.run(start_scheduler)

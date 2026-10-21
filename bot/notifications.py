@@ -12,12 +12,10 @@ from typing import TYPE_CHECKING, Callable, Final
 
 import aiofiles
 import anyio
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo, Message
-from telegram.constants import ChatAction
-from telegram.error import BadRequest
 
 from klippy import Klippy, PrintState
 from telegram_helper import TelegramMessageRepr
+from tg.base import ChatAction, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaKind, TelegramBackend, TgApiError, TgInputMedia, TgMessage
 
 if TYPE_CHECKING:
     from typing import Any
@@ -38,13 +36,13 @@ class Notifier:
     def __init__(
         self,
         config: ConfigWrapper,
-        bot: Bot,
+        backend: TelegramBackend,
         klippy: Klippy,
         camera_wrapper: Camera,
         scheduler: BaseScheduler,
         logging_handler: logging.Handler,
     ) -> None:
-        self._bot: Bot = bot
+        self._backend: TelegramBackend = backend
         self._chat_id: int = config.secrets.chat_id
         self._cam_wrap: Camera = camera_wrapper
 
@@ -75,9 +73,9 @@ class Notifier:
         self._last_m117_status: str = ""
         self._last_tgnotify_status: str = ""
 
-        self._status_message: Message | None = None
+        self._status_message: TgMessage | None = None
         self._bzz_mess_id: int = 0
-        self._groups_status_messages: dict[int, Message] = {}
+        self._groups_status_messages: dict[int, TgMessage] = {}
 
         if logging_handler:
             logger.addHandler(logging_handler)
@@ -162,11 +160,11 @@ class Notifier:
         if self._progress_update_message:
             if self._bzz_mess_id != 0:
                 try:
-                    await self._bot.delete_message(self._chat_id, self._bzz_mess_id)
-                except BadRequest as badreq:
+                    await self._backend.delete_message(self._chat_id, self._bzz_mess_id)
+                except TgApiError as badreq:
                     logger.warning("Failed deleting bzz message \n%s", badreq)
                     self._bzz_mess_id = 0
-            mes = await self._bot.send_message(self._chat_id, text="Status has been updated\nThis message will be deleted", disable_notification=message.is_silent())
+            mes = await self._backend.send_message(self._chat_id, text="Status has been updated\nThis message will be deleted", disable_notification=message.is_silent())
             self._bzz_mess_id = mes.message_id
 
     async def _send_message(self, message: TelegramMessageRepr, group_only: bool = False, manual: bool = False) -> None:
@@ -175,17 +173,17 @@ class Notifier:
                 await message.update_existing(self._status_message)
                 await self._send_bzz_message(message)
             else:
-                sent_message = await message.send(self._bot, self._chat_id)
+                sent_message = await message.send(self._backend, self._chat_id)
                 if not self._status_message and not manual:
                     self._status_message = sent_message
 
         for group, message_thread_id in self._notify_groups:
-            await self._bot.send_chat_action(chat_id=group, message_thread_id=message_thread_id, action=ChatAction.TYPING)
+            await self._backend.send_chat_action(chat_id=group, message_thread_id=message_thread_id, action=ChatAction.TYPING)
             if group in self._groups_status_messages and not manual:
                 mess = self._groups_status_messages[group]
                 await message.update_existing(mess)
             else:
-                sent_message = await message.send(self._bot, group, message_thread_id=message_thread_id)
+                sent_message = await message.send(self._backend, group, message_thread_id=message_thread_id)
                 if group in self._groups_status_messages or manual:
                     continue
                 self._groups_status_messages[group] = sent_message
@@ -198,18 +196,18 @@ class Notifier:
                     await message.update_existing(self._status_message, photo=photo)
                     await self._send_bzz_message(message)
                 else:
-                    sent_message = await message.send(self._bot, self._chat_id, photo=photo)
+                    sent_message = await message.send(self._backend, self._chat_id, photo=photo)
                     if not self._status_message and not manual:
                         self._status_message = sent_message
 
             for group, message_thread_id in self._notify_groups:
                 photo.seek(0)
-                await self._bot.send_chat_action(chat_id=group, message_thread_id=message_thread_id, action=ChatAction.UPLOAD_PHOTO)
+                await self._backend.send_chat_action(chat_id=group, message_thread_id=message_thread_id, action=ChatAction.UPLOAD_PHOTO)
                 if group in self._groups_status_messages and not manual:
                     mess = self._groups_status_messages[group]
                     await message.update_existing(mess, photo=photo)
                 else:
-                    sent_message = await message.send(self._bot, group, photo=photo, message_thread_id=message_thread_id)
+                    sent_message = await message.send(self._backend, group, photo=photo, message_thread_id=message_thread_id)
                     if group in self._groups_status_messages or manual:
                         continue
                     self._groups_status_messages[group] = sent_message
@@ -285,16 +283,16 @@ class Notifier:
 
         if self._status_message:
             try:
-                await self._bot.unpin_chat_message(self._chat_id, self._status_message.message_id)
-            except BadRequest as badreq:
+                await self._backend.unpin_chat_message(self._chat_id, self._status_message.message_id)
+            except TgApiError as badreq:
                 logger.warning("Failed unpining status message \n%s", badreq)
 
         self._status_message = None
         self._groups_status_messages = {}
         if self._bzz_mess_id != 0:
             try:
-                await self._bot.delete_message(self._chat_id, self._bzz_mess_id)
-            except BadRequest as badreq:
+                await self._backend.delete_message(self._chat_id, self._bzz_mess_id)
+            except TgApiError as badreq:
                 logger.warning("Failed deleting bzz message \n%s", badreq)
             finally:
                 self._bzz_mess_id = 0
@@ -397,18 +395,18 @@ class Notifier:
         )
 
         if not self._group_only:
-            status_message = await tg_message.send(self._bot, self._chat_id, bio)
+            status_message = await tg_message.send(self._backend, self._chat_id, bio)
             self._status_message = status_message
 
         for group_, message_thread_id in self._notify_groups:
             bio.seek(0)
-            self._groups_status_messages[group_] = await tg_message.send(self._bot, group_, bio, message_thread_id)
+            self._groups_status_messages[group_] = await tg_message.send(self._backend, group_, bio, message_thread_id)
 
         bio.close()
 
         if self._pin_status_single_message and self._status_message is not None:
-            await self._bot.unpin_all_chat_messages(self._chat_id)
-            await self._bot.pin_chat_message(self._chat_id, self._status_message.message_id, disable_notification=self.silent_status)
+            await self._backend.unpin_all_chat_messages(self._chat_id)
+            await self._backend.pin_chat_message(self._chat_id, self._status_message.message_id, disable_notification=self.silent_status)
 
     def send_print_start_info(self) -> None:
         if self._enabled:
@@ -451,11 +449,11 @@ class Notifier:
 
     async def _send_image(self, paths: list[str], message: str) -> None:
         try:
-            photos_list: list[InputMediaAudio | InputMediaDocument | InputMediaPhoto | InputMediaVideo] = []
+            photos_list: list[TgInputMedia] = []
             for path in paths:
                 path_obj = anyio.Path(path)
                 if not await path_obj.is_file():
-                    await self._bot.send_message(self._chat_id, text="Provided path is not a file", disable_notification=self._silent_commands)
+                    await self._backend.send_message(self._chat_id, text="Provided path is not a file", disable_notification=self._silent_commands)
                     return
 
                 bio = BytesIO()
@@ -465,14 +463,14 @@ class Notifier:
                     bio.write(await fh.read())
                 bio.seek(0)
                 if bio.getbuffer().nbytes > self._max_upload_file_size * 1024 * 1024:
-                    await self._bot.send_message(self._chat_id, text=f"Telegram bots have a {self._max_upload_file_size}mb filesize restriction, image couldn't be uploaded: `{path}`")
+                    await self._backend.send_message(self._chat_id, text=f"Telegram bots have a {self._max_upload_file_size}mb filesize restriction, image couldn't be uploaded: `{path}`")
                 elif not photos_list:
-                    photos_list.append(InputMediaPhoto(bio, filename=bio.name, caption=message))
+                    photos_list.append(TgInputMedia(InputMediaKind.PHOTO, bio.getvalue(), filename=bio.name, caption=message))
                 else:
-                    photos_list.append(InputMediaPhoto(bio, filename=bio.name))
+                    photos_list.append(TgInputMedia(InputMediaKind.PHOTO, bio.getvalue(), filename=bio.name))
                 bio.close()
 
-            await self._bot.send_media_group(
+            await self._backend.send_media_group(
                 self._chat_id,
                 media=photos_list,
                 disable_notification=self._silent_commands,
@@ -480,18 +478,18 @@ class Notifier:
 
         except Exception as ex:
             logger.warning(ex)
-            await self._bot.send_message(self._chat_id, text=f"Error sending image: {ex}", disable_notification=self._silent_commands)
+            await self._backend.send_message(self._chat_id, text=f"Error sending image: {ex}", disable_notification=self._silent_commands)
 
     def send_image(self, ws_message: str) -> None:
         self._schedule_job(self._send_image, {"paths": self._parse_path(ws_message), "message": self._parse_message(ws_message)})
 
     async def _send_video(self, paths: list[str], message: str) -> None:
         try:
-            photos_list: list[InputMediaAudio | InputMediaDocument | InputMediaPhoto | InputMediaVideo] = []
+            photos_list: list[TgInputMedia] = []
             for path in paths:
                 path_obj = anyio.Path(path)
                 if not await path_obj.is_file():
-                    await self._bot.send_message(self._chat_id, text="Provided path is not a file", disable_notification=self._silent_commands)
+                    await self._backend.send_message(self._chat_id, text="Provided path is not a file", disable_notification=self._silent_commands)
                     return
 
                 bio = BytesIO()
@@ -501,34 +499,33 @@ class Notifier:
                     bio.write(await fh.read())
                 bio.seek(0)
                 if bio.getbuffer().nbytes > self._max_upload_file_size * 1024 * 1024:
-                    await self._bot.send_message(self._chat_id, text=f"Telegram bots have a {self._max_upload_file_size}mb filesize restriction, video couldn't be uploaded: `{path}`")
+                    await self._backend.send_message(self._chat_id, text=f"Telegram bots have a {self._max_upload_file_size}mb filesize restriction, video couldn't be uploaded: `{path}`")
                 elif not photos_list:
-                    photos_list.append(InputMediaVideo(bio, filename=bio.name, caption=message))
+                    photos_list.append(TgInputMedia(InputMediaKind.VIDEO, bio.getvalue(), filename=bio.name, caption=message))
                 else:
-                    photos_list.append(InputMediaVideo(bio, filename=bio.name))
+                    photos_list.append(TgInputMedia(InputMediaKind.VIDEO, bio.getvalue(), filename=bio.name))
                 bio.close()
 
-            await self._bot.send_media_group(
+            await self._backend.send_media_group(
                 self._chat_id,
                 media=photos_list,
                 disable_notification=self._silent_commands,
-                write_timeout=120,
             )
 
         except Exception as ex:
             logger.warning(ex)
-            await self._bot.send_message(self._chat_id, text=f"Error sending video: {ex}", disable_notification=self._silent_commands)
+            await self._backend.send_message(self._chat_id, text=f"Error sending video: {ex}", disable_notification=self._silent_commands)
 
     def send_video(self, ws_message: str) -> None:
         self._schedule_job(self._send_video, {"paths": self._parse_path(ws_message), "message": self._parse_message(ws_message)})
 
     async def _send_document(self, paths: list[str], message: str) -> None:
         try:
-            photos_list: list[InputMediaAudio | InputMediaDocument | InputMediaPhoto | InputMediaVideo] = []
+            photos_list: list[TgInputMedia] = []
             for path in paths:
                 path_obj = anyio.Path(path)
                 if not await path_obj.is_file():
-                    await self._bot.send_message(self._chat_id, text="Provided path is not a file", disable_notification=self._silent_commands)
+                    await self._backend.send_message(self._chat_id, text="Provided path is not a file", disable_notification=self._silent_commands)
                     return
 
                 bio = BytesIO()
@@ -538,14 +535,14 @@ class Notifier:
                     bio.write(await fh.read())
                 bio.seek(0)
                 if bio.getbuffer().nbytes > self._max_upload_file_size * 1024 * 1024:
-                    await self._bot.send_message(self._chat_id, text=f"Telegram bots have a {self._max_upload_file_size}mb filesize restriction, document couldn't be uploaded: `{path}`")
+                    await self._backend.send_message(self._chat_id, text=f"Telegram bots have a {self._max_upload_file_size}mb filesize restriction, document couldn't be uploaded: `{path}`")
                 elif not photos_list:
-                    photos_list.append(InputMediaDocument(bio, filename=bio.name, caption=message))
+                    photos_list.append(TgInputMedia(InputMediaKind.DOCUMENT, bio.getvalue(), filename=bio.name, caption=message))
                 else:
-                    photos_list.append(InputMediaDocument(bio, filename=bio.name))
+                    photos_list.append(TgInputMedia(InputMediaKind.DOCUMENT, bio.getvalue(), filename=bio.name))
                 bio.close()
 
-            await self._bot.send_media_group(
+            await self._backend.send_media_group(
                 self._chat_id,
                 media=photos_list,
                 disable_notification=self._silent_commands,
@@ -553,7 +550,7 @@ class Notifier:
 
         except Exception as ex:
             logger.warning(ex)
-            await self._bot.send_message(self._chat_id, text=f"Error sending document: {ex}", disable_notification=self._silent_commands)
+            await self._backend.send_message(self._chat_id, text=f"Error sending document: {ex}", disable_notification=self._silent_commands)
 
     def send_document(self, ws_message: str) -> None:
         self._schedule_job(self._send_document, {"paths": self._parse_path(ws_message), "message": self._parse_message(ws_message)})
@@ -609,7 +606,7 @@ class Notifier:
         title_mathc = re.search(r"message\s*=\s*\'(.[^\']*)\'", message)
         title = title_mathc.group(1) if title_mathc else ""
 
-        await self._bot.send_message(
+        await self._backend.send_message(
             self._chat_id,
             text=title,
             reply_markup=InlineKeyboardMarkup(keyboard),

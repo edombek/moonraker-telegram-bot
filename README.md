@@ -11,6 +11,25 @@ As always with solutions like these, we kindly remind you not to print unattende
 
 Please check out our [wiki](https://github.com/nlef/moonraker-telegram-bot/wiki) for installation instructions and detailed feature descriptions.
 
+## Telegram transport: HTTP Bot API or MTProto
+
+By default the bot talks to Telegram over the HTTPS Bot API (`api.telegram.org`).
+If that endpoint is blocked or throttled in your region, you can switch to the
+MTProto protocol (a direct connection to Telegram data centers) by setting in
+`telegram.conf`:
+
+```ini
+[bot]
+api_type: mtproto
+api_id: 123456
+api_hash: 0123456789abcdef0123456789abcdef
+```
+
+`api_id` and `api_hash` are obtained from [my.telegram.org](https://my.telegram.org)
+under API Development; the regular `bot_token` is used for the MTProto bot login.
+No session files are stored - the bot re-authenticates with the token on every start.
+The `http_proxy`/`socks_proxy` options apply to the HTTP transport only.
+
 ## Issues and bug reports
 
 We will be happy to assist you with any issues that you have, as long as you can form a coherent sentence and are polite in your requests.

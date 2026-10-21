@@ -67,12 +67,20 @@ pillow==10.4.0 ; python_full_version < '3.10'
     # via moonraker-telegram-bot
 pillow==12.1.1 ; python_full_version >= '3.10'
     # via moonraker-telegram-bot
+pyaes==1.6.1
+    # via telethon
+pyasn1==0.6.4
+    # via rsa
 python-telegram-bot==22.5 ; python_full_version < '3.10'
     # via moonraker-telegram-bot
 python-telegram-bot==22.7 ; python_full_version >= '3.10'
     # via moonraker-telegram-bot
+rsa==4.9.1
+    # via telethon
 socksio==1.0.0
     # via httpx
+telethon==1.45.0
+    # via moonraker-telegram-bot
 typing-extensions==4.15.0 ; python_full_version < '3.13'
     # via
     #   anyio
