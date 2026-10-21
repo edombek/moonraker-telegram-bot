@@ -281,7 +281,7 @@ class _MTLMessage(TgMessage):
         return _MTLMessage(self._backend, await self._message.reply(**kwargs, caption=caption, parse_mode=_parse_mode(parse_mode), silent=disable_notification))
 
     async def reply_media_group(self, media: list[TgInputMedia], *, disable_notification: bool = False, do_quote: bool = False) -> list[TgMessage]:
-        return await self._backend.send_media_group(self.chat_id, media, disable_notification=disable_notification, reply_to=self._message if do_quote else None)
+        return await self._backend.send_media_group(self.chat_id, media, disable_notification=disable_notification, reply_to=self if do_quote else None)
 
     async def edit_text(self, text: str, *, parse_mode: str | None = None, reply_markup: Any = None) -> None:
         await self._message.edit(text=text, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup))
@@ -517,11 +517,10 @@ class MTProtoBackend(TelegramBackend):
         return _MTLMessage(self, message)
 
     async def send_media_group(self, chat_id: int, media: list[TgInputMedia], *, disable_notification: bool = False, reply_to: TgMessage | None = None) -> list[TgMessage]:
-        if reply_to is None:
-            try:
-                return await self._send_multi_media(chat_id, media, disable_notification)
-            except RPCError as ex:
-                logger.warning("sendMultiMedia failed (%s), sending items one by one", ex)
+        # messages.SendMultiMediaRequest is rejected for bot sessions ("Media invalid",
+        # live-verified), so album semantics are unavailable over MTProto: items are
+        # sent one by one. Keep _send_multi_media as reference in case Telegram opens
+        # it up for bots.
         messages: list[TgMessage] = []
         for item in media:
             message = await self._send_single_media(chat_id, item, disable_notification, reply_to.message_id if reply_to is not None and not messages else None)

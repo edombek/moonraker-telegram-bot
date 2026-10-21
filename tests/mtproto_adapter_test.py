@@ -1,8 +1,10 @@
+import asyncio
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from telethon import types
 
+from tg.base import TgMessage
 from tg.mtproto import MTProtoBackend, _MTLMessage
 
 
@@ -55,3 +57,14 @@ def test_document_none_for_photo_media() -> None:
     photo = types.Photo(id=1, access_hash=2, file_reference=b"", date=datetime.now(tz=timezone.utc), sizes=[], dc_id=1)
     message = _MTLMessage(make_backend(), make_message(types.MessageMediaPhoto(photo=photo)))
     assert message.document is None
+
+
+def test_reply_media_group_passes_neutral_reply_to() -> None:
+    backend = make_backend()
+    backend.send_media_group = AsyncMock()  # type: ignore[method-assign]
+    message = _MTLMessage(backend, make_message(None))
+    asyncio.run(message.reply_media_group([], do_quote=True))
+    _, kwargs = backend.send_media_group.call_args
+    reply_to = kwargs["reply_to"]
+    assert isinstance(reply_to, TgMessage)
+    assert reply_to.message_id == 7
