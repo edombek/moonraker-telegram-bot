@@ -41,6 +41,11 @@ Starting the bot repeatedly in short bursts can result in a `FloodWaitError`
 and the bot will be unable to log in until the reported wait time has passed.
 This does not affect normal single restarts.
 
+Known MTProto limitation: Telegram rejects `messages.SendMultiMedia` for bot
+sessions, so the MTProto transport sends album items (progress photo+text,
+multi-file replies) one after another instead of as a single grouped album.
+Everything else (photos, videos, documents, inline keyboards) is unaffected.
+
 ## Issues and bug reports
 
 We will be happy to assist you with any issues that you have, as long as you can form a coherent sentence and are polite in your requests.
