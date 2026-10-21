@@ -8,6 +8,7 @@ from io import BytesIO
 import logging
 import signal
 from typing import IO, TYPE_CHECKING, Any, Callable
+import warnings
 
 import httpx
 from telethon import TelegramClient, events, functions, types  # type: ignore[import-untyped]
@@ -323,17 +324,21 @@ class MTProtoBackend(TelegramBackend):
         self._registry: HandlerRegistry | None = None
 
         connection, proxy = self._build_proxy()
-        self._client = TelegramClient(
-            StringSession(),
-            config.bot_config.api_id,
-            config.bot_config.api_hash,
-            connection=connection,
-            proxy=proxy,
-            request_retries=3,
-            connection_retries=3,
-            retry_delay=1,
-            auto_reconnect=True,
-        )
+        with warnings.catch_warnings():
+            # Telethon warns about python-socks for any proxy tuple, but MTProxy
+            # works in-protocol (InitConnection InputClientProxy) without it.
+            warnings.filterwarnings("ignore", message="proxy argument will be ignored because python-socks is not installed")
+            self._client = TelegramClient(
+                StringSession(),
+                config.bot_config.api_id,
+                config.bot_config.api_hash,
+                connection=connection,
+                proxy=proxy,
+                request_retries=3,
+                connection_retries=3,
+                retry_delay=1,
+                auto_reconnect=True,
+            )
 
     def _build_proxy(self) -> tuple[Any, Any]:
         proxy_string = self._config.bot_config.mtproto_proxy
