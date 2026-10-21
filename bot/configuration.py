@@ -197,6 +197,9 @@ class BotConfig(ConfigHelper):
         "ssl",
         "ssl_verify",
         "api_url",
+        "api_type",
+        "api_id",
+        "api_hash",
         "http_proxy",
         "socks_proxy",
         "debug",
@@ -217,7 +220,11 @@ class BotConfig(ConfigHelper):
         self.ssl_verify: bool = self._get_boolean("ssl_verify", default=True)
         self.port: int = self._get_int("port", default=80)
         self.api_url: str = self._get_str("api_url", default="https://api.telegram.org/bot")
-        self.max_upload_file_size: int = 50 if self.api_url == "https://api.telegram.org/bot" else 2000
+        self.api_type: str = self._get_str("api_type", default="http", allowed_values=["http", "mtproto"])
+        self.api_id: int = self._get_int("api_id", default=0)
+        self.api_hash: str = self._get_str("api_hash", default="")
+        default_upload_size = self.api_type == "http" and self.api_url == "https://api.telegram.org/bot"
+        self.max_upload_file_size: int = 50 if default_upload_size else 2000
         self.socks_proxy: str = self._get_str("socks_proxy", default="")
         self.http_proxy: str = self._get_str("http_proxy", default="")
         self.light_device_name: str = self._get_str("light_device", default="")
@@ -239,6 +246,12 @@ class BotConfig(ConfigHelper):
             self._parsing_errors.append("Http and Socks proxies are mutually exclusive. Only one type can be specified.")
             self.socks_proxy = ""
             self.http_proxy = ""
+
+        if self.api_type == "mtproto":
+            if self.api_id <= 0:
+                self._parsing_errors.append("Option 'api_id': value is required when api_type is mtproto")
+            if not re.fullmatch("[0-9a-fA-F]{32}", self.api_hash):
+                self._parsing_errors.append("Option 'api_hash': value must be a 32-character hex string when api_type is mtproto")
 
     @property
     def formatted_upload_path(self) -> str:
@@ -533,7 +546,7 @@ class ConfigWrapper:
 
     def dump_config_to_log(self) -> None:
         config_copy = copy.deepcopy(self._config)
-        for option in ("bot_token", "chat_id", "password", "api_token", "proxy_password"):
+        for option in ("bot_token", "chat_id", "password", "api_token", "proxy_password", "api_hash"):
             if config_copy.has_option("bot", option):
                 config_copy.set("bot", option, "<redacted>")
         for sec in config_copy.sections():
