@@ -12,7 +12,7 @@ import warnings
 
 import httpx
 from telethon import TelegramClient, events, functions, types  # type: ignore[import-untyped]
-from telethon.errors import RPCError  # type: ignore[import-untyped]
+from telethon.errors import MessageNotModifiedError, RPCError  # type: ignore[import-untyped]
 from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyIntermediate, ConnectionTcpMTProxyRandomizedIntermediate  # type: ignore[import-untyped]
 from telethon.sessions import StringSession  # type: ignore[import-untyped]
 
@@ -228,7 +228,19 @@ class _MTLMessage(TgMessage):
     ) -> TgMessage:
         if not do_quote:
             return await self._backend.send_message(self.chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=disable_notification)
-        return _MTLMessage(self._backend, await self._message.reply(text, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup), silent=disable_notification))
+        # Message.reply() only forwards to send_message(), which has no caption/file
+        # kwargs; send with an explicit reply_to instead.
+        return _MTLMessage(
+            self._backend,
+            await self._backend._client.send_message(  # noqa: SLF001
+                self.chat_id,
+                text,
+                reply_to=self.message_id,
+                parse_mode=_parse_mode(parse_mode),
+                buttons=_tl_markup(reply_markup),
+                silent=disable_notification,
+            ),
+        )
 
     async def reply_photo(
         self,
@@ -247,13 +259,15 @@ class _MTLMessage(TgMessage):
             )
         return _MTLMessage(
             self._backend,
-            await self._message.reply(
-                file=photo,
+            await self._backend._client.send_file(  # noqa: SLF001
+                self.chat_id,
+                photo,
+                reply_to=self.message_id,
                 caption=caption,
                 parse_mode=_parse_mode(parse_mode),
+                formatting_entities=_tl_entities(caption_entities),
                 buttons=_tl_markup(reply_markup),
                 silent=disable_notification,
-                formatting_entities=_tl_entities(caption_entities),
             ),
         )
 
@@ -278,16 +292,30 @@ class _MTLMessage(TgMessage):
             return await self._backend.send_video(
                 self.chat_id, video, thumbnail=thumbnail, width=width, height=height, caption=caption, parse_mode=parse_mode, disable_notification=disable_notification
             )
-        return _MTLMessage(self._backend, await self._message.reply(**kwargs, caption=caption, parse_mode=_parse_mode(parse_mode), silent=disable_notification))
+        kwargs.pop("file")
+        return _MTLMessage(
+            self._backend,
+            await self._backend._client.send_file(  # noqa: SLF001
+                self.chat_id,
+                video,
+                reply_to=self.message_id,
+                caption=caption,
+                parse_mode=_parse_mode(parse_mode),
+                silent=disable_notification,
+                **kwargs,
+            ),
+        )
 
     async def reply_media_group(self, media: list[TgInputMedia], *, disable_notification: bool = False, do_quote: bool = False) -> list[TgMessage]:
         return await self._backend.send_media_group(self.chat_id, media, disable_notification=disable_notification, reply_to=self if do_quote else None)
 
     async def edit_text(self, text: str, *, parse_mode: str | None = None, reply_markup: Any = None) -> None:
-        await self._message.edit(text=text, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup))
+        with suppress(MessageNotModifiedError):
+            await self._message.edit(text=text, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup))
 
     async def edit_caption(self, caption: str, *, parse_mode: str | None = None, reply_markup: Any = None) -> None:
-        await self._message.edit(text=caption, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup))
+        with suppress(MessageNotModifiedError):
+            await self._message.edit(text=caption, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup))
 
     async def edit_media(self, photo: Any) -> None:
         await self._message.edit(file=photo)
