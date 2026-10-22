@@ -11,6 +11,7 @@ from typing import IO, TYPE_CHECKING, Any, Callable
 import warnings
 
 import httpx
+from PIL import Image
 from telethon import TelegramClient, events, functions, types  # type: ignore[import-untyped]
 from telethon.errors import MessageNotModifiedError, RPCError  # type: ignore[import-untyped]
 from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyIntermediate, ConnectionTcpMTProxyRandomizedIntermediate  # type: ignore[import-untyped]
@@ -261,7 +262,7 @@ class _MTLMessage(TgMessage):
             self._backend,
             await self._backend._client.send_file(  # noqa: SLF001
                 self.chat_id,
-                photo,
+                _as_photo_file(photo),
                 reply_to=self.message_id,
                 caption=caption,
                 parse_mode=_parse_mode(parse_mode),
@@ -507,7 +508,7 @@ class MTProtoBackend(TelegramBackend):
     ) -> TgMessage:
         message = await self._client.send_file(
             chat_id,
-            file=photo,
+            file=_as_photo_file(photo),
             caption=caption or None,
             parse_mode=_parse_mode(parse_mode),
             buttons=_tl_markup(reply_markup),
@@ -571,7 +572,10 @@ class MTProtoBackend(TelegramBackend):
         return messages
 
     async def _send_single_media(self, chat_id: int, item: TgInputMedia, disable_notification: bool, reply_to_msg_id: int | None) -> Any:
-        kwargs: dict[str, Any] = {"file": _named_bytes(item.media, item.filename), "silent": disable_notification, "reply_to": reply_to_msg_id}
+        file: IO[bytes] = _named_bytes(item.media, item.filename)
+        if item.kind is InputMediaKind.PHOTO:
+            file = _as_photo_file(file)
+        kwargs: dict[str, Any] = {"file": file, "silent": disable_notification, "reply_to": reply_to_msg_id}
         if item.caption:
             kwargs["caption"] = item.caption
         if item.kind is InputMediaKind.DOCUMENT:
@@ -637,6 +641,32 @@ def _named_bytes(data: bytes, name: str | None) -> IO[bytes]:
     if name:
         bio.name = name
     return bio
+
+
+def _as_photo_file(photo: Any) -> Any:
+    """Re-encode non-jpeg/png images (e.g. webp Moonraker thumbnails) to png.
+
+    Telethon classifies uploads client-side and would send webp as a
+    document, unlike the Bot API.
+    """
+    data: bytes | None = None
+    if isinstance(photo, bytes):
+        data = photo
+    elif isinstance(photo, BytesIO):
+        data = photo.getvalue()
+    if data is None:
+        return photo
+    try:
+        image = Image.open(BytesIO(data))
+    except Exception:
+        return photo
+    if image.format in ("JPEG", "PNG"):
+        return photo
+    converted = BytesIO()
+    image.convert("RGB").save(converted, format="PNG")
+    converted.seek(0)
+    converted.name = "photo.png"
+    return converted
 
 
 def _input_media_for(item: TgInputMedia, uploaded: Any) -> Any:

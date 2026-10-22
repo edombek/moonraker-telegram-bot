@@ -1,12 +1,14 @@
 import asyncio
 from datetime import datetime, timezone
+from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 
+from PIL import Image
 from telethon import types
 from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyIntermediate, ConnectionTcpMTProxyRandomizedIntermediate
 
 from tg.base import TgMessage
-from tg.mtproto import MTProtoBackend, _MTLMessage
+from tg.mtproto import MTProtoBackend, _as_photo_file, _MTLMessage
 
 
 def make_message(media: object) -> MagicMock:
@@ -78,3 +80,21 @@ def test_reply_media_group_passes_neutral_reply_to() -> None:
     reply_to = kwargs["reply_to"]
     assert isinstance(reply_to, TgMessage)
     assert reply_to.message_id == 7
+
+
+def _image_bytes(fmt: str) -> bytes:
+    bio = BytesIO()
+    Image.new("RGB", (8, 8), "red").save(bio, format=fmt)
+    return bio.getvalue()
+
+
+def test_as_photo_file_converts_webp_to_png() -> None:
+    converted = _as_photo_file(BytesIO(_image_bytes("WEBP")))
+    assert Image.open(converted).format == "PNG"
+
+
+def test_as_photo_file_keeps_jpeg_and_non_images() -> None:
+    jpeg = BytesIO(_image_bytes("JPEG"))
+    assert _as_photo_file(jpeg) is jpeg
+    raw = BytesIO(b"not an image")
+    assert _as_photo_file(raw) is raw
