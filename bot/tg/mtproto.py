@@ -645,10 +645,13 @@ def _named_bytes(data: bytes, name: str | None) -> IO[bytes]:
 
 
 def _as_photo_file(photo: Any) -> Any:
-    """Re-encode non-jpeg/png images (e.g. webp Moonraker thumbnails) to png.
+    """Send images as photos regardless of their original name or format.
 
-    Telethon classifies uploads client-side and would send webp as a
-    document, unlike the Bot API.
+    Telethon classifies uploads purely by file extension and only treats
+    png/jpeg names as photos, so webp-named Moonraker thumbnails and
+    nameless camera snapshots would arrive as documents, unlike via the
+    Bot API. Unsupported formats are re-encoded to png and the upload is
+    always given a photo file extension.
     """
     data: bytes | None = None
     if isinstance(photo, bytes):
@@ -661,13 +664,18 @@ def _as_photo_file(photo: Any) -> Any:
         image = Image.open(BytesIO(data))
     except Exception:
         return photo
-    if image.format in ("JPEG", "PNG"):
+    ext = {"JPEG": ".jpg", "PNG": ".png"}.get(image.format or "", "")
+    if ext and str(getattr(photo, "name", "")).lower().endswith(ext):
         return photo
-    converted = BytesIO()
-    image.convert("RGB").save(converted, format="PNG")
-    converted.seek(0)
-    converted.name = "photo.png"
-    return converted
+    out = BytesIO()
+    if not ext:
+        image.convert("RGB").save(out, format="PNG")
+        ext = ".png"
+    else:
+        out.write(data)
+    out.seek(0)
+    out.name = "photo" + ext
+    return out
 
 
 def _input_media_for(item: TgInputMedia, uploaded: Any) -> Any:

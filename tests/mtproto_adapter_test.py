@@ -91,13 +91,30 @@ def _image_bytes(fmt: str) -> bytes:
 def test_as_photo_file_converts_webp_to_png() -> None:
     converted = _as_photo_file(BytesIO(_image_bytes("WEBP")))
     assert Image.open(converted).format == "PNG"
+    assert converted.name == "photo.png"
 
 
 def test_as_photo_file_keeps_jpeg_and_non_images() -> None:
     jpeg = BytesIO(_image_bytes("JPEG"))
+    jpeg.name = "photo.jpg"
     assert _as_photo_file(jpeg) is jpeg
     raw = BytesIO(b"not an image")
     assert _as_photo_file(raw) is raw
+
+
+def test_as_photo_file_fixes_missing_or_wrong_extension() -> None:
+    # camera snapshots arrive as unnamed jpeg bytes -> telethon needs an extension
+    unnamed = BytesIO(_image_bytes("JPEG"))
+    renamed = _as_photo_file(unnamed)
+    assert renamed is not unnamed
+    assert renamed.name == "photo.jpg"
+    assert Image.open(renamed).format == "JPEG"
+    # moonraker thumbnails are png bytes but named ".webp"
+    thumb = BytesIO(_image_bytes("PNG"))
+    thumb.name = ".webp"
+    renamed = _as_photo_file(thumb)
+    assert renamed.name == "photo.png"
+    assert Image.open(renamed).format == "PNG"
 
 
 def test_send_chat_action_builds_tl_actions() -> None:
