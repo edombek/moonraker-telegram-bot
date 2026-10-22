@@ -4,6 +4,13 @@
 server: localhost
 bot_token: AweSomeBotToken
 chat_id: 0
+# Telegram transport: http (Bot API over HTTPS, default) or mtproto (direct connection to Telegram DCs via Telethon)
+#api_type: http
+# api_id/api_hash from https://my.telegram.org, required for api_type: mtproto
+#api_id: 123456
+#api_hash: 0123456789abcdef0123456789abcdef
+# optional MTProxy for the MTProto transport, format host:port:secret
+#mtproto_proxy: 192.168.1.10:5365:dd0123456789abcdef0123456789abcdef
 
 [camera]
 host: http://localhost:8080/?action=stream

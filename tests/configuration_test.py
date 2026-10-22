@@ -103,3 +103,77 @@ def test_dump_does_not_add_redacted_for_unset_options(config_helper: ConfigWrapp
     dumped = _read_dumped_config(config_helper)
     assert not dumped.has_option("bot", "password")
     assert not dumped.has_option("bot", "api_token")
+
+
+def _write_config(tmp_path: Path, body: str) -> ConfigWrapper:
+    config_path = tmp_path / "telegram.conf"
+    config_path.write_text(body, encoding="utf-8")
+    wrapper = ConfigWrapper(config_path)
+    wrapper.bot_config.log_file = tmp_path / "bot.log"
+    return wrapper
+
+
+def test_api_type_defaults_to_http(tmp_path: Path) -> None:
+    wrapper = _write_config(tmp_path, "[bot]\nchat_id: 16612341234\nbot_token: 23423423334:sdfgsdfg\n")
+    assert wrapper.configuration_errors == ""
+    assert wrapper.bot_config.api_type == "http"
+    assert wrapper.bot_config.max_upload_file_size == 50
+
+
+def test_mtproto_requires_api_id_and_hash(tmp_path: Path) -> None:
+    wrapper = _write_config(tmp_path, "[bot]\nchat_id: 1\nbot_token: a:b\napi_type: mtproto\n")
+    assert "api_id" in wrapper.configuration_errors
+    assert "api_hash" in wrapper.configuration_errors
+
+
+def test_mtproto_validates_api_hash_format(tmp_path: Path) -> None:
+    body = "[bot]\nchat_id: 1\nbot_token: a:b\napi_type: mtproto\napi_id: 123\napi_hash: nothex32\n"
+    wrapper = _write_config(tmp_path, body)
+    assert "api_hash" in wrapper.configuration_errors
+
+
+def test_mtproto_rejects_unknown_api_type(tmp_path: Path) -> None:
+    wrapper = _write_config(tmp_path, "[bot]\nchat_id: 1\nbot_token: a:b\napi_type: websocket\n")
+    assert "api_type" in wrapper.configuration_errors
+
+
+def test_mtproto_valid_config(tmp_path: Path) -> None:
+    body = "[bot]\nchat_id: 1\nbot_token: a:b\napi_type: mtproto\napi_id: 123456\napi_hash: 0123456789abcdef0123456789abcdef\n"
+    wrapper = _write_config(tmp_path, body)
+    assert wrapper.configuration_errors == ""
+    assert wrapper.bot_config.api_type == "mtproto"
+    assert wrapper.bot_config.api_id == 123456
+    assert wrapper.bot_config.max_upload_file_size == 2000
+
+
+def test_mtproto_proxy_valid(tmp_path: Path) -> None:
+    body = "[bot]\nchat_id: 1\nbot_token: a:b\napi_type: mtproto\napi_id: 123456\napi_hash: 0123456789abcdef0123456789abcdef\nmtproto_proxy: 192.168.1.10:5365:dd411a6a32488ba568c4e53e0860b0833a\n"
+    wrapper = _write_config(tmp_path, body)
+    assert wrapper.configuration_errors == ""
+    assert wrapper.bot_config.mtproto_proxy == "192.168.1.10:5365:dd411a6a32488ba568c4e53e0860b0833a"
+
+
+def test_mtproto_proxy_bad_format(tmp_path: Path) -> None:
+    body = "[bot]\nchat_id: 1\nbot_token: a:b\napi_type: mtproto\napi_id: 123456\napi_hash: 0123456789abcdef0123456789abcdef\nmtproto_proxy: justahost\n"
+    wrapper = _write_config(tmp_path, body)
+    assert "mtproto_proxy" in wrapper.configuration_errors
+
+
+def test_mtproto_proxy_requires_mtproto_api_type(tmp_path: Path) -> None:
+    body = "[bot]\nchat_id: 1\nbot_token: a:b\nmtproto_proxy: 192.168.1.10:5365:dd411a6a32488ba568c4e53e0860b0833a\n"
+    wrapper = _write_config(tmp_path, body)
+    assert "mtproto_proxy" in wrapper.configuration_errors
+
+
+def test_dump_redacts_mtproto_proxy(tmp_path: Path) -> None:
+    body = "[bot]\nchat_id: 1\nbot_token: a:b\napi_type: mtproto\napi_id: 123456\napi_hash: 0123456789abcdef0123456789abcdef\nmtproto_proxy: 192.168.1.10:5365:dd411a6a32488ba568c4e53e0860b0833a\n"
+    wrapper = _write_config(tmp_path, body)
+    dumped = _read_dumped_config(wrapper)
+    assert dumped.get("bot", "mtproto_proxy") == "<redacted>"
+
+
+def test_dump_redacts_api_hash(tmp_path: Path) -> None:
+    body = "[bot]\nchat_id: 1\nbot_token: a:b\napi_type: mtproto\napi_id: 123456\napi_hash: 0123456789abcdef0123456789abcdef\n"
+    wrapper = _write_config(tmp_path, body)
+    dumped = _read_dumped_config(wrapper)
+    assert dumped.get("bot", "api_hash") == "<redacted>"

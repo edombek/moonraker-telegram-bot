@@ -18,6 +18,7 @@ dependencies = [
     "pillow==12.1.1; python_version>='3.10'",
     "python-telegram-bot[callback-data,http2,job-queue,rate-limiter,socks]==22.5; python_version=='3.9'",
     "python-telegram-bot[callback-data,http2,job-queue,rate-limiter,socks]==22.7; python_version>='3.10'",
+    "telethon==1.45.0",
     "tzlocal==5.3.1",
     "uvloop==0.22.1; platform_system!='Windows'",
     "websockets==15.0.1; python_version=='3.9'",
@@ -139,6 +140,7 @@ known-first-party = [
     "timelapse",
     "websocket_helper",
     "telegram_helper",
+    "tg",
 ]
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [ "D100", "D101", "PLR2004", "S101", "S105", "SLF001" ]

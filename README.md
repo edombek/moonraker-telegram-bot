@@ -11,6 +11,46 @@ As always with solutions like these, we kindly remind you not to print unattende
 
 Please check out our [wiki](https://github.com/nlef/moonraker-telegram-bot/wiki) for installation instructions and detailed feature descriptions.
 
+## Telegram transport: HTTP Bot API or MTProto
+
+By default the bot talks to Telegram over the HTTPS Bot API (`api.telegram.org`).
+If that endpoint is blocked or throttled in your region, you can switch to the
+MTProto protocol (a direct connection to Telegram data centers) by setting in
+`telegram.conf`:
+
+```ini
+[bot]
+api_type: mtproto
+api_id: 123456
+api_hash: 0123456789abcdef0123456789abcdef
+```
+
+`api_id` and `api_hash` are obtained from [my.telegram.org](https://my.telegram.org)
+under API Development; the regular `bot_token` is used for the MTProto bot login.
+No session files are stored - the bot re-authenticates with the token on every start.
+The `http_proxy`/`socks_proxy` options apply to the HTTP transport only. For the
+MTProto transport you can use an MTProxy server:
+
+```ini
+[bot]
+mtproto_proxy: proxy-host:port:secret
+```
+
+The `secret` is the MTProxy secret as configured on the proxy: a plain 32-hex-char
+secret, or a `dd`-prefixed one (randomized intermediate). The matching protocol is
+picked automatically from the prefix. `socks_proxy`/`http_proxy` are ignored in
+MTProto mode.
+
+Note: MTProto bot login (`importBotAuthorization`) is rate-limited by Telegram.
+Starting the bot repeatedly in short bursts can result in a `FloodWaitError`
+and the bot will be unable to log in until the reported wait time has passed.
+This does not affect normal single restarts.
+
+Known MTProto limitation: Telegram rejects `messages.SendMultiMedia` for bot
+sessions, so the MTProto transport sends album items (progress photo+text,
+multi-file replies) one after another instead of as a single grouped album.
+Everything else (photos, videos, documents, inline keyboards) is unaffected.
+
 ## Issues and bug reports
 
 We will be happy to assist you with any issues that you have, as long as you can form a coherent sentence and are polite in your requests.

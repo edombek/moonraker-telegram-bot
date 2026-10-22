@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from telegram import Bot, InlineKeyboardMarkup, InputMediaPhoto, Message
-from telegram.constants import ChatAction, ParseMode
 from telegram.helpers import escape_markdown
+
+from tg.base import ChatAction, InlineKeyboardMarkup, ParseMode, TgMessage
 
 if TYPE_CHECKING:
     from io import BytesIO
+
+    from tg.base import TelegramBackend
 
 
 class TelegramMessageRepr:
@@ -34,18 +36,19 @@ class TelegramMessageRepr:
     def is_silent(self) -> bool:
         return self._silent
 
-    async def send_as_reply(self, other_message: Message, photo: BytesIO | bytes | None = None) -> None:
+    async def send_as_reply(self, other_message: TgMessage, photo: BytesIO | bytes | None = None) -> None:
         if photo:
-            await other_message.get_bot().send_chat_action(other_message.chat_id, action=ChatAction.UPLOAD_PHOTO)
+            await other_message.send_chat_action(ChatAction.UPLOAD_PHOTO)
             await other_message.reply_photo(
                 photo=photo,
                 caption=self._text,
                 parse_mode=self._parse_mode,
                 disable_notification=self._silent,
                 reply_markup=self._reply_markup,
+                do_quote=True,
             )
         else:
-            await other_message.get_bot().send_chat_action(other_message.chat_id, action=ChatAction.TYPING)
+            await other_message.send_chat_action(ChatAction.TYPING)
             await other_message.reply_text(
                 self._text,
                 parse_mode=self._parse_mode,
@@ -54,9 +57,9 @@ class TelegramMessageRepr:
                 reply_markup=self._reply_markup,
             )
 
-    async def send(self, bot: Bot, chat_id: int, photo: BytesIO | bytes | None = None, message_thread_id: int | None = None) -> Message:
+    async def send(self, backend: TelegramBackend, chat_id: int, photo: BytesIO | bytes | None = None, message_thread_id: int | None = None) -> TgMessage:
         if photo:
-            return await bot.send_photo(
+            return await backend.send_photo(
                 chat_id,
                 photo=photo,
                 caption=self._text,
@@ -65,7 +68,7 @@ class TelegramMessageRepr:
                 disable_notification=self._silent,
                 message_thread_id=message_thread_id,
             )
-        return await bot.send_message(
+        return await backend.send_message(
             chat_id,
             text=self._text,
             parse_mode=self._parse_mode,
@@ -74,10 +77,10 @@ class TelegramMessageRepr:
             message_thread_id=message_thread_id,
         )
 
-    async def update_existing(self, other_message: Message, photo: BytesIO | bytes | None = None) -> None:
+    async def update_existing(self, other_message: TgMessage, photo: BytesIO | bytes | None = None) -> None:
         if photo:
             # TODO: [fixme] check if media in message!
-            await other_message.edit_media(media=InputMediaPhoto(photo))
+            await other_message.edit_media(photo)
         if other_message.caption:
             await other_message.edit_caption(
                 caption=self._text,

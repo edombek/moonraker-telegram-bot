@@ -15,15 +15,12 @@ import time
 from typing import TYPE_CHECKING, Any, Final
 
 import ffmpegcv  # type: ignore[import-untyped]
-from telegram import InputFile
-from telegram.constants import ChatAction
-from telegram.error import BadRequest
 
 from camera import create_thumb, os_nice
+from tg.base import ChatAction, TelegramBackend, TgApiError, TgMessage
 
 if TYPE_CHECKING:
     from apscheduler.schedulers.base import BaseScheduler  # type: ignore[import-untyped]
-    from telegram import Bot, Message
 
     from camera import Camera
     from configuration import ConfigWrapper
@@ -47,7 +44,7 @@ class Timelapse:
         klippy: Klippy,
         camera: Camera,
         scheduler: BaseScheduler,
-        bot: Bot,
+        backend: TelegramBackend,
         logging_handler: logging.Handler,
     ) -> None:
         self._enabled: bool = config.timelapse.enabled and camera.enabled
@@ -78,7 +75,7 @@ class Timelapse:
 
         self._sched: BaseScheduler = scheduler
         self._chat_id: int = config.secrets.chat_id
-        self._bot: Bot = bot
+        self._backend: TelegramBackend = backend
 
         self._running: bool = False
         self._paused: bool = False
@@ -280,7 +277,7 @@ class Timelapse:
                 replace_existing=True,
             )
 
-    async def upload_timelapse(self, lapse_filename: str, info_mess: Message, gcode_name_out: str | None = None) -> None:
+    async def upload_timelapse(self, lapse_filename: str, info_mess: TgMessage, gcode_name_out: str | None = None) -> None:
         try:
             gcode_name = lapse_filename if gcode_name_out is None else gcode_name_out
             (
@@ -300,19 +297,19 @@ class Timelapse:
                     lapse_caption = f"time-lapse of {gcode_name}"
                     if self._lapse_missed_frames > 0:
                         lapse_caption += f"\n{self._lapse_missed_frames} frames missed"
-                    await self._bot.send_video(
+                    await self._backend.send_video(
                         self._chat_id,
-                        video=InputFile(video_bytes, filename=f"{gcode_name}.mp4"),
+                        video=video_bytes,
                         thumbnail=thumb_bytes,
                         width=width,
                         height=height,
                         caption=lapse_caption,
-                        write_timeout=600,
+                        filename=f"{gcode_name}.mp4",
                         disable_notification=self._silent_progress,
                     )
                     try:
-                        await self._bot.delete_message(self._chat_id, message_id=info_mess.message_id)
-                    except BadRequest as badreq:
+                        await self._backend.delete_message(self._chat_id, message_id=info_mess.message_id)
+                    except TgApiError as badreq:
                         logger.warning("Failed deleting message \n%s", badreq)
                     self._cleanup_lapse(lapse_filename)
             else:
@@ -340,7 +337,7 @@ class Timelapse:
         gcode_name = self._klippy.printing_filename
         logger.info("Starting timelapse assembly for %s", gcode_name)
 
-        info_mess: Message = await self._bot.send_message(
+        info_mess: TgMessage = await self._backend.send_message(
             chat_id=self._chat_id,
             text=f"Starting time-lapse assembly for {gcode_name}",
             disable_notification=self._silent_progress,
@@ -354,7 +351,7 @@ class Timelapse:
         while self._executors_pool._work_queue.qsize() > 0:  # noqa: ASYNC110, SLF001
             await asyncio.sleep(1)
 
-        await self._bot.send_chat_action(chat_id=self._chat_id, action=ChatAction.RECORD_VIDEO)
+        await self._backend.send_chat_action(chat_id=self._chat_id, action=ChatAction.RECORD_VIDEO)
 
         await self.upload_timelapse(lapse_filename, info_mess, gcode_name)
 
