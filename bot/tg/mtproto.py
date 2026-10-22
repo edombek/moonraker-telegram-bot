@@ -13,7 +13,7 @@ import warnings
 import httpx
 from telethon import TelegramClient, events, functions, types  # type: ignore[import-untyped]
 from telethon.errors import RPCError  # type: ignore[import-untyped]
-from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyRandomizedIntermediate  # type: ignore[import-untyped]
+from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyIntermediate, ConnectionTcpMTProxyRandomizedIntermediate  # type: ignore[import-untyped]
 from telethon.sessions import StringSession  # type: ignore[import-untyped]
 
 from tg.base import (
@@ -345,8 +345,12 @@ class MTProtoBackend(TelegramBackend):
         proxy_string = self._config.bot_config.mtproto_proxy
         if proxy_string:
             host, port, secret = proxy_string.rsplit(":", 2)
+            if secret.startswith("dd"):
+                # dd-prefixed secrets require the randomized intermediate protocol.
+                logger.info("MTProto backend: using MTProxy (dd-secret) at %s:%s", host, port)
+                return ConnectionTcpMTProxyRandomizedIntermediate, (host, int(port), secret)
             logger.info("MTProto backend: using MTProxy at %s:%s", host, port)
-            return ConnectionTcpMTProxyRandomizedIntermediate, (host, int(port), secret)
+            return ConnectionTcpMTProxyIntermediate, (host, int(port), secret)
         if self._config.bot_config.socks_proxy or self._config.bot_config.http_proxy:
             logger.warning("MTProto backend ignores socks_proxy/http_proxy (http backend only). Use mtproto_proxy with a MTProxy server instead.")
         return ConnectionTcpIntermediate, None

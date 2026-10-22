@@ -36,6 +36,11 @@ MTProto transport you can use an MTProxy server:
 mtproto_proxy: proxy-host:port:secret
 ```
 
+The `secret` is the MTProxy secret as configured on the proxy: a plain 32-hex-char
+secret, or a `dd`-prefixed one (randomized intermediate). The matching protocol is
+picked automatically from the prefix. `socks_proxy`/`http_proxy` are ignored in
+MTProto mode.
+
 Note: MTProto bot login (`importBotAuthorization`) is rate-limited by Telegram.
 Starting the bot repeatedly in short bursts can result in a `FloodWaitError`
 and the bot will be unable to log in until the reported wait time has passed.

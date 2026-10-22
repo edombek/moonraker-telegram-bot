@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 from telethon import types
+from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyIntermediate, ConnectionTcpMTProxyRandomizedIntermediate
 
 from tg.base import TgMessage
 from tg.mtproto import MTProtoBackend, _MTLMessage
@@ -16,15 +17,24 @@ def make_message(media: object) -> MagicMock:
     return message
 
 
-def make_backend() -> MTProtoBackend:
+def make_backend(proxy: str = "") -> MTProtoBackend:
     config = MagicMock()
     config.bot_config.api_type = "mtproto"
     config.bot_config.api_id = 1
     config.bot_config.api_hash = "0" * 32
-    config.bot_config.mtproto_proxy = ""
+    config.bot_config.mtproto_proxy = proxy
     config.bot_config.socks_proxy = ""
     config.bot_config.http_proxy = ""
     return MTProtoBackend(config)
+
+
+def test_proxy_connection_class_selection() -> None:
+    dd = make_backend("proxy.host:1234:dd" + "ab" * 16)
+    plain = make_backend("proxy.host:1234:02" + "cd" * 15)
+    direct = make_backend("")
+    assert dd._build_proxy()[0] is ConnectionTcpMTProxyRandomizedIntermediate
+    assert plain._build_proxy()[0] is ConnectionTcpMTProxyIntermediate
+    assert direct._build_proxy()[0] is ConnectionTcpIntermediate
 
 
 def document_media(file_name: str = "cube.gcode") -> types.MessageMediaDocument:
