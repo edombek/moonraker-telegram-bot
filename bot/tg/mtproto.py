@@ -320,7 +320,7 @@ class _MTLMessage(TgMessage):
             await self._message.edit(text=caption, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup))
 
     async def edit_media(self, photo: Any) -> None:
-        await self._message.edit(file=photo)
+        await self._message.edit(file=_as_photo_file(photo))
 
     async def delete(self) -> None:
         await self._message.delete()

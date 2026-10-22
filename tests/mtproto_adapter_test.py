@@ -117,6 +117,16 @@ def test_as_photo_file_fixes_missing_or_wrong_extension() -> None:
     assert Image.open(renamed).format == "PNG"
 
 
+def test_edit_media_uploads_named_photo() -> None:
+    tl_message = make_message(None)
+    tl_message.edit = AsyncMock()
+    message = _MTLMessage(make_backend(), tl_message)
+    asyncio.run(message.edit_media(BytesIO(_image_bytes("WEBP"))))
+    file = tl_message.edit.call_args.kwargs["file"]
+    assert file.name == "photo.png"
+    assert Image.open(file).format == "PNG"
+
+
 def test_send_chat_action_builds_tl_actions() -> None:
     backend = make_backend()
     backend._client = AsyncMock()
