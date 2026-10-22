@@ -45,11 +45,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TYPING_ACTIONS = {
+_TYPING_ACTIONS: dict[ChatAction, Callable[[], Any]] = {
     ChatAction.TYPING: types.SendMessageTypingAction,
-    ChatAction.UPLOAD_PHOTO: types.SendMessageUploadPhotoAction,
+    # upload actions in TL carry a progress field; typing indicators don't need it
+    ChatAction.UPLOAD_PHOTO: lambda: types.SendMessageUploadPhotoAction(progress=0),
     ChatAction.RECORD_VIDEO: types.SendMessageRecordVideoAction,
-    ChatAction.UPLOAD_DOCUMENT: types.SendMessageUploadDocumentAction,
+    ChatAction.UPLOAD_DOCUMENT: lambda: types.SendMessageUploadDocumentAction(progress=0),
 }
 
 _ENTITY_TO_NAME: list[tuple[type[Any], str]] = [

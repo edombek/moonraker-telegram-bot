@@ -7,7 +7,7 @@ from PIL import Image
 from telethon import types
 from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyIntermediate, ConnectionTcpMTProxyRandomizedIntermediate
 
-from tg.base import TgMessage
+from tg.base import ChatAction, TgMessage
 from tg.mtproto import MTProtoBackend, _as_photo_file, _MTLMessage
 
 
@@ -98,3 +98,11 @@ def test_as_photo_file_keeps_jpeg_and_non_images() -> None:
     assert _as_photo_file(jpeg) is jpeg
     raw = BytesIO(b"not an image")
     assert _as_photo_file(raw) is raw
+
+
+def test_send_chat_action_builds_tl_actions() -> None:
+    backend = make_backend()
+    backend._client = AsyncMock()
+    for action in ChatAction:
+        asyncio.run(backend.send_chat_action(42, action))  # must not raise TypeError
+    assert backend._client.call_count == len(ChatAction)
