@@ -4,6 +4,7 @@ from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 
 from PIL import Image
+import pytest
 from telethon import types
 from telethon.network import ConnectionTcpIntermediate, ConnectionTcpMTProxyIntermediate, ConnectionTcpMTProxyRandomizedIntermediate
 
@@ -133,3 +134,41 @@ def test_send_chat_action_builds_tl_actions() -> None:
     for action in ChatAction:
         asyncio.run(backend.send_chat_action(42, action))  # must not raise TypeError
     assert backend._client.call_count == len(ChatAction)
+
+
+def test_send_message_retried_after_connection_loss() -> None:
+    backend = make_backend()
+    client = MagicMock()
+    client.is_connected.return_value = False
+    client.connect = AsyncMock()
+    client.send_message = AsyncMock(side_effect=[asyncio.CancelledError(), make_message(None)])
+    backend._client = client
+    result = asyncio.run(backend.send_message(42, "hi"))
+    assert isinstance(result, TgMessage)
+    assert client.send_message.await_count == 2
+    client.connect.assert_awaited_once()
+
+
+def test_send_message_task_cancellation_propagates() -> None:
+    backend = make_backend()
+    client = MagicMock()
+    client.is_connected.return_value = True
+    client.send_message = AsyncMock(side_effect=asyncio.CancelledError())
+    backend._client = client
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(backend.send_message(42, "hi"))
+    assert client.send_message.await_count == 1
+
+
+def test_edit_media_retried_after_connection_loss() -> None:
+    backend = make_backend()
+    client = MagicMock()
+    client.is_connected.return_value = False
+    client.connect = AsyncMock()
+    backend._client = client
+    tl_message = make_message(None)
+    tl_message.edit = AsyncMock(side_effect=[asyncio.CancelledError(), None])
+    message = _MTLMessage(backend, tl_message)
+    asyncio.run(message.edit_media(_image_bytes("JPEG")))
+    assert tl_message.edit.await_count == 2
+    client.connect.assert_awaited_once()

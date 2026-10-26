@@ -67,6 +67,28 @@ _ENTITY_TO_NAME: list[tuple[type[Any], str]] = [
 _NAME_TO_ENTITY: dict[str, Any] = {name: cls for cls, name in _ENTITY_TO_NAME}
 
 
+async def _retry_on_disconnect(client: Any, what: str, action: Callable[[], Any]) -> Any:
+    """Run a Telethon request, retrying once if the MTProto connection dropped.
+
+    When the connection dies Telethon cancels every in-flight request with
+    CancelledError; retrying after a reconnect covers that (observed live as
+    a burst of CancelledError tracebacks across all notification jobs). A
+    cancellation while the client is still connected means the task itself
+    was cancelled (shutdown), so it must propagate instead.
+    """
+    try:
+        return await action()
+    except asyncio.CancelledError:
+        if client.is_connected():
+            raise
+        logger.warning("%s interrupted by Telegram connection loss, retrying once", what)
+    except ConnectionError as exc:
+        logger.warning("%s failed on a dead Telegram connection, retrying once: %s", what, exc)
+    with suppress(Exception):
+        await client.connect()
+    return await action()
+
+
 def _parse_mode(parse_mode: str | None) -> str | None:
     if parse_mode == "HTML":
         return "html"
@@ -259,17 +281,22 @@ class _MTLMessage(TgMessage):
             return await self._backend.send_photo(
                 self.chat_id, photo, caption=caption or "", parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=disable_notification, caption_entities=caption_entities
             )
+        client = self._backend._client  # noqa: SLF001
         return _MTLMessage(
             self._backend,
-            await self._backend._client.send_file(  # noqa: SLF001
-                self.chat_id,
-                _as_photo_file(photo),
-                reply_to=self.message_id,
-                caption=caption,
-                parse_mode=_parse_mode(parse_mode),
-                formatting_entities=_tl_entities(caption_entities),
-                buttons=_tl_markup(reply_markup),
-                silent=disable_notification,
+            await _retry_on_disconnect(
+                client,
+                "reply_photo",
+                lambda: client.send_file(
+                    self.chat_id,
+                    _as_photo_file(photo),
+                    reply_to=self.message_id,
+                    caption=caption,
+                    parse_mode=_parse_mode(parse_mode),
+                    formatting_entities=_tl_entities(caption_entities),
+                    buttons=_tl_markup(reply_markup),
+                    silent=disable_notification,
+                ),
             ),
         )
 
@@ -285,7 +312,7 @@ class _MTLMessage(TgMessage):
         disable_notification: bool = False,
         do_quote: bool = False,
     ) -> TgMessage:
-        kwargs: dict[str, Any] = {"file": video, "supports_streaming": True}
+        kwargs: dict[str, Any] = {"supports_streaming": True}
         if thumbnail is not None:
             kwargs["thumb"] = thumbnail
         if width and height:
@@ -294,17 +321,21 @@ class _MTLMessage(TgMessage):
             return await self._backend.send_video(
                 self.chat_id, video, thumbnail=thumbnail, width=width, height=height, caption=caption, parse_mode=parse_mode, disable_notification=disable_notification
             )
-        kwargs.pop("file")
+        client = self._backend._client  # noqa: SLF001
         return _MTLMessage(
             self._backend,
-            await self._backend._client.send_file(  # noqa: SLF001
-                self.chat_id,
-                video,
-                reply_to=self.message_id,
-                caption=caption,
-                parse_mode=_parse_mode(parse_mode),
-                silent=disable_notification,
-                **kwargs,
+            await _retry_on_disconnect(
+                client,
+                "reply_video",
+                lambda: client.send_file(
+                    self.chat_id,
+                    video,
+                    reply_to=self.message_id,
+                    caption=caption,
+                    parse_mode=_parse_mode(parse_mode),
+                    silent=disable_notification,
+                    **kwargs,
+                ),
             ),
         )
 
@@ -312,15 +343,26 @@ class _MTLMessage(TgMessage):
         return await self._backend.send_media_group(self.chat_id, media, disable_notification=disable_notification, reply_to=self if do_quote else None)
 
     async def edit_text(self, text: str, *, parse_mode: str | None = None, reply_markup: Any = None) -> None:
+        client = self._backend._client  # noqa: SLF001
         with suppress(MessageNotModifiedError):
-            await self._message.edit(text=text, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup))
+            await _retry_on_disconnect(
+                client,
+                "edit_text",
+                lambda: self._message.edit(text=text, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup)),
+            )
 
     async def edit_caption(self, caption: str, *, parse_mode: str | None = None, reply_markup: Any = None) -> None:
+        client = self._backend._client  # noqa: SLF001
         with suppress(MessageNotModifiedError):
-            await self._message.edit(text=caption, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup))
+            await _retry_on_disconnect(
+                client,
+                "edit_caption",
+                lambda: self._message.edit(text=caption, parse_mode=_parse_mode(parse_mode), buttons=_tl_markup(reply_markup)),
+            )
 
     async def edit_media(self, photo: Any) -> None:
-        await self._message.edit(file=_as_photo_file(photo))
+        client = self._backend._client  # noqa: SLF001
+        await _retry_on_disconnect(client, "edit_media", lambda: self._message.edit(file=_as_photo_file(photo)))
 
     async def delete(self) -> None:
         await self._message.delete()
@@ -485,13 +527,17 @@ class MTProtoBackend(TelegramBackend):
         disable_notification: bool = False,
         message_thread_id: int | None = None,
     ) -> TgMessage:
-        message = await self._client.send_message(
-            chat_id,
-            text,
-            reply_to=message_thread_id,
-            parse_mode=_parse_mode(parse_mode),
-            buttons=_tl_markup(reply_markup),
-            silent=disable_notification,
+        message = await _retry_on_disconnect(
+            self._client,
+            "send_message",
+            lambda: self._client.send_message(
+                chat_id,
+                text,
+                reply_to=message_thread_id,
+                parse_mode=_parse_mode(parse_mode),
+                buttons=_tl_markup(reply_markup),
+                silent=disable_notification,
+            ),
         )
         return _MTLMessage(self, message)
 
@@ -507,15 +553,19 @@ class MTProtoBackend(TelegramBackend):
         message_thread_id: int | None = None,
         caption_entities: list[TgMessageEntity] | None = None,
     ) -> TgMessage:
-        message = await self._client.send_file(
-            chat_id,
-            file=_as_photo_file(photo),
-            caption=caption or None,
-            parse_mode=_parse_mode(parse_mode),
-            buttons=_tl_markup(reply_markup),
-            silent=disable_notification,
-            reply_to=message_thread_id,
-            formatting_entities=_tl_entities(caption_entities),
+        message = await _retry_on_disconnect(
+            self._client,
+            "send_photo",
+            lambda: self._client.send_file(
+                chat_id,
+                file=_as_photo_file(photo),
+                caption=caption or None,
+                parse_mode=_parse_mode(parse_mode),
+                buttons=_tl_markup(reply_markup),
+                silent=disable_notification,
+                reply_to=message_thread_id,
+                formatting_entities=_tl_entities(caption_entities),
+            ),
         )
         return _MTLMessage(self, message)
 
@@ -533,21 +583,17 @@ class MTProtoBackend(TelegramBackend):
         filename: str | None = None,
     ) -> TgMessage:
         kwargs: dict[str, Any] = {"supports_streaming": True}
-        if isinstance(video, bytes):
-            kwargs["file"] = _named_bytes(video, filename)
-        else:
-            kwargs["file"] = video
-        if thumbnail is not None:
-            kwargs["thumb"] = _named_bytes(thumbnail, "thumb.jpg") if isinstance(thumbnail, bytes) else thumbnail
         if width and height:
             kwargs["attributes"] = [types.DocumentAttributeVideo(duration=0, w=width, h=height, round_message=False, supports_streaming=True)]
-        message = await self._client.send_file(
-            chat_id,
-            caption=caption or None,
-            parse_mode=_parse_mode(parse_mode),
-            silent=disable_notification,
-            **kwargs,
-        )
+
+        def _send() -> Any:
+            # fresh file/thumb objects per attempt: a retried upload must not
+            # reuse a stream position left over by the failed attempt
+            file = _named_bytes(video, filename) if isinstance(video, bytes) else video
+            thumb = _named_bytes(thumbnail, "thumb.jpg") if isinstance(thumbnail, bytes) else thumbnail
+            return self._client.send_file(chat_id, file=file, thumb=thumb, caption=caption or None, parse_mode=_parse_mode(parse_mode), silent=disable_notification, **kwargs)
+
+        message = await _retry_on_disconnect(self._client, "send_video", _send)
         return _MTLMessage(self, message)
 
     async def send_media_group(self, chat_id: int, media: list[TgInputMedia], *, disable_notification: bool = False, reply_to: TgMessage | None = None) -> list[TgMessage]:
@@ -573,17 +619,21 @@ class MTProtoBackend(TelegramBackend):
         return messages
 
     async def _send_single_media(self, chat_id: int, item: TgInputMedia, disable_notification: bool, reply_to_msg_id: int | None) -> Any:
-        file: IO[bytes] = _named_bytes(item.media, item.filename)
-        if item.kind is InputMediaKind.PHOTO:
-            file = _as_photo_file(file)
-        kwargs: dict[str, Any] = {"file": file, "silent": disable_notification, "reply_to": reply_to_msg_id}
+        kwargs: dict[str, Any] = {"silent": disable_notification, "reply_to": reply_to_msg_id}
         if item.caption:
             kwargs["caption"] = item.caption
         if item.kind is InputMediaKind.DOCUMENT:
             kwargs["force_document"] = True
         elif item.kind is InputMediaKind.VIDEO:
             kwargs["supports_streaming"] = True
-        return await self._client.send_file(chat_id, **kwargs)
+
+        def _send() -> Any:
+            file: IO[bytes] = _named_bytes(item.media, item.filename)
+            if item.kind is InputMediaKind.PHOTO:
+                file = _as_photo_file(file)
+            return self._client.send_file(chat_id, file=file, **kwargs)
+
+        return await _retry_on_disconnect(self._client, "send_media_group item", _send)
 
     async def send_chat_action(self, chat_id: int, action: ChatAction, message_thread_id: int | None = None) -> None:
         try:

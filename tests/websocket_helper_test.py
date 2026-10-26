@@ -1,4 +1,5 @@
 import logging
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -653,3 +654,22 @@ class TestWebsocketToMessage:
 
         assert ws_helper._klippy.filament_used == 123.4
         assert ws_helper._klippy.printing_duration == 500.0
+
+
+class TestReconnectNotification:
+    def test_short_outage_is_not_announced(self, ws_helper: WebSocketHelper, mock_notifier: MagicMock) -> None:
+        ws_helper._disconnected_at = time.monotonic() - 5.0
+        ws_helper._notify_reconnect()
+        mock_notifier.send_printer_status_notification.assert_not_called()
+        assert ws_helper._disconnected_at is None
+
+    def test_long_outage_is_announced(self, ws_helper: WebSocketHelper, mock_notifier: MagicMock) -> None:
+        ws_helper._disconnected_at = time.monotonic() - 120.0
+        ws_helper._notify_reconnect()
+        mock_notifier.send_printer_status_notification.assert_called_once_with("Moonraker reconnected")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_records_outage_start(self, ws_helper: WebSocketHelper) -> None:
+        assert ws_helper._disconnected_at is None
+        await ws_helper._cleanup_connection()
+        assert ws_helper._disconnected_at is not None
