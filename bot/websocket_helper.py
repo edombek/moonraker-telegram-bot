@@ -8,6 +8,7 @@ from http import HTTPStatus
 import logging
 import os
 import ssl
+import time
 import traceback
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -35,6 +36,10 @@ if TYPE_CHECKING:
     from timelapse import Timelapse
 
 JSONRPC_METHOD_NOT_FOUND = -32601
+
+# Outages shorter than this are bridged transparently by the reconnect loop;
+# notifying about them spams the chat when a loaded host drops websockets often.
+_RECONNECT_NOTIFY_SECONDS = 60.0
 
 # Methods that may not be available depending on Moonraker configuration
 _OPTIONAL_METHODS = frozenset({"machine.device_power.devices"})
@@ -109,6 +114,7 @@ class WebSocketHelper:
         self._ws: ClientConnection
         self._pending_requests: dict[int, str] = {}
         self._request_id_counter: int = 0
+        self._disconnected_at: float | None = None
 
         if config.bot_config.debug:
             logger.setLevel(logging.DEBUG)
@@ -513,8 +519,18 @@ class WebSocketHelper:
             await anyio.sleep(0.01)
 
     async def _cleanup_connection(self) -> None:
+        self._disconnected_at = time.monotonic()
         await self._klippy.on_disconnected()
         self._cancel_reconnect()
+
+    def _notify_reconnect(self) -> None:
+        disconnected_at = self._disconnected_at
+        self._disconnected_at = None
+        downtime = 0.0 if disconnected_at is None else time.monotonic() - disconnected_at
+        if downtime >= _RECONNECT_NOTIFY_SECONDS:
+            self._notifier.send_printer_status_notification("Moonraker reconnected")
+        else:
+            logger.info("Skipping reconnect notification: outage lasted only %.0fs", downtime)
 
     async def run_forever_async(self) -> None:
         if self._log_parser:
@@ -528,7 +544,8 @@ class WebSocketHelper:
                 async with connect(
                     uri=f"{self._protocol}://{self._host}:{self._port}/websocket",
                     additional_headers=self._klippy.auth_headers,
-                    open_timeout=5.0,
+                    # loaded single-board hosts can need more than 5s to answer the upgrade
+                    open_timeout=10.0,
                     ping_interval=10.0,  # as moonraker
                     ping_timeout=30.0,  # as moonraker
                     close_timeout=5.0,
@@ -539,7 +556,7 @@ class WebSocketHelper:
                     delays = backoff()
                     if was_connected:
                         logger.info("Moonraker reconnected")
-                        self._notifier.send_printer_status_notification("Moonraker reconnected")
+                        self._notify_reconnect()
                     was_connected = True
                     self._ws = websocket
                     self._scheduler.add_job(self.reschedule, "interval", seconds=2, id=self._WS_RESCHEDULE_JOB_ID, replace_existing=True, coalesce=True, misfire_grace_time=10)
