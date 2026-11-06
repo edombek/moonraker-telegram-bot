@@ -7,7 +7,8 @@ Klipper/Moonraker Telegram bot. Single Python app, no package structure: code li
 - Setup: `uv sync` (uv is the package manager; `pyproject.toml` + `uv.lock` are the source of truth).
 - Full check (what CI runs, in this order): `uv run prek run --all-files --show-diff-on-failure --color=always` then `uv run pytest -v`. `prek` is a pre-commit drop-in; hooks = ruff check --fix, ruff format, mypy, codespell, pyproject-fmt, requirements sync.
 - Single test: `uv run pytest -v tests/websocket_helper_test.py::test_name`.
-- Run locally: `uv run python3 bot/main.py -c agent_workspace/telegram_dev.conf`. Config sample sections: `tests/resources/*.conf`.
+- Git hook (optional, what contributors use): `uv run prek install` runs the same checks on commit.
+- Run locally: `uv run python3 bot/main.py -c "$PWD/agent_workspace/telegram_dev.conf"` — the config path must be **absolute**: `main.py` does `os.chdir(sys.path[0])` (into `bot/`) before reading `-c`, and configparser silently ignores a missing file (empty config → `InvalidToken`). Config sample sections: `tests/resources/*.conf`.
 - Docker test builds target `linux/arm64` (buildx/QEMU required on x86 hosts). Dockerfile (opencv), Dockerfile-mjpeg, Dockerfile-dev (profiling tools).
 
 ## Non-obvious constraints
@@ -22,11 +23,12 @@ Klipper/Moonraker Telegram bot. Single Python app, no package structure: code li
 
 ## Architecture
 
-- `bot/main.py` wires everything in its `__main__` block into module-level globals (`config_wrap`, `klippy`, `notifier`, `timelapse`, `camera_wrap`, `ws_helper`, `tg_backend`, `a_scheduler`) that handlers reference directly — only pure functions there are unit-tested. It builds `Klippy`, a camera subclass chosen by `[camera] type` (default `mjpeg`; classes in `bot/camera.py`), `Timelapse`, `Notifier`, `WebSocketHelper` (Moonraker websocket), and the Telegram backend via `create_backend()` keyed on `[bot] api_type`: `BotApiBackend` (python-telegram-bot, polling — default) or `MTProtoBackend` (Telethon).
+- `bot/main.py` wires everything in its `__main__` block into module-level globals (`config_wrap`, `klippy`, `notifier`, `timelapse`, `camera_wrap`, `ws_helper`, `tg_backend`, `a_scheduler`) that handlers reference directly — only pure functions there are unit-tested. It builds `Klippy`, a camera subclass chosen by `[camera] type` (default `mjpeg`; classes in `bot/camera.py`), `Timelapse`, `Notifier`, `WebSocketHelper` (Moonraker websocket), and the Telegram backend via `create_backend()` keyed on `[bot] api_type`: `http` (default) → `BotApiBackend` (python-telegram-bot, polling), `mtproto` → `MTProtoBackend` (Telethon; requires `api_id`/`api_hash` in `[secrets]`).
 - Telegram transport is isolated behind `bot/tg/`: `base.py` defines neutral types (`TgUpdate`, `TgMessage`, ...), the `TelegramBackend` ABC and `HandlerRegistry` (commands, callback patterns, document, catch-all, unknown_chat/unknown_chat guard). `main.py` registers all handlers into the registry; backends only map their library's events into `TgUpdate`. Never call PTB/Telethon APIs from `main.py` — go through `tg_backend`. `restart_bot()` = scheduler shutdown + SIGTERM to self (each backend's `run()` handles termination).
 - Data flow split: realtime print state and print control go over the Moonraker websocket (`ws_helper`); files/metadata/DB/power devices/versions go over Moonraker REST (`Klippy`). Outbound Telegram traffic has exactly one door: `tg_backend` (+ `telegram_helper.TelegramMessageRepr` for edit-in-place status messages).
 - Block diagrams of the whole system (startup, update routing, print lifecycle, gcode upload) live in `agent_workspace/architecture.md` (untracked — if missing, regenerate by reading the code).
 - Every new `telegram.conf` key must be added to `_KNOWN_ITEMS` of the section class in `bot/configuration.py`, otherwise it is reported as an unknown config field; sensitive values belong in `[secrets]`.
+- Section-presence is the feature switch: `Notifier` start/finish/cancel/error notifications are gated by `NotifierConfig.enabled = config.has_section("progress_notification")` (`[timelapse]` likewise). A conf without that section silently sends no print-lifecycle messages.
 - Async stack: asyncio (+ uvloop on non-Windows), websockets to Moonraker, jobs via apscheduler `AsyncIOScheduler`. ffmpeg (system binary) is required for the `ffmpeg` camera type and timelapse encoding.
 
 ## Agent workspace (`agent_workspace/`, git-ignored)

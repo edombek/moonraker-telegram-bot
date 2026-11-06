@@ -76,6 +76,10 @@ class Notifier:
         self._status_message: TgMessage | None = None
         self._bzz_mess_id: int = 0
         self._groups_status_messages: dict[int, TgMessage] = {}
+        # Serializes check-then-send/edit of the status message: at print start, _send_print_start_info
+        # and an m117-triggered _notify run concurrently; without this lock both see _status_message None
+        # and each sends its own message, leaving an orphaned, never-updated duplicate.
+        self._status_lock: asyncio.Lock = asyncio.Lock()
 
         if logging_handler:
             logger.addHandler(logging_handler)
@@ -168,51 +172,53 @@ class Notifier:
             self._bzz_mess_id = mes.message_id
 
     async def _send_message(self, message: TelegramMessageRepr, group_only: bool = False, manual: bool = False) -> None:
-        if not group_only:
-            if self._status_message and not manual:
-                await message.update_existing(self._status_message)
-                await self._send_bzz_message(message)
-            else:
-                sent_message = await message.send(self._backend, self._chat_id)
-                if not self._status_message and not manual:
-                    self._status_message = sent_message
-
-        for group, message_thread_id in self._notify_groups:
-            await self._backend.send_chat_action(chat_id=group, message_thread_id=message_thread_id, action=ChatAction.TYPING)
-            if group in self._groups_status_messages and not manual:
-                mess = self._groups_status_messages[group]
-                await message.update_existing(mess)
-            else:
-                sent_message = await message.send(self._backend, group, message_thread_id=message_thread_id)
-                if group in self._groups_status_messages or manual:
-                    continue
-                self._groups_status_messages[group] = sent_message
-
-    async def _send_photo(self, message: TelegramMessageRepr, group_only: bool = False, manual: bool = False) -> None:
-        loop = asyncio.get_running_loop()
-        with await loop.run_in_executor(self._executors_pool, self._cam_wrap.take_photo) as photo:
+        async with self._status_lock:
             if not group_only:
                 if self._status_message and not manual:
-                    await message.update_existing(self._status_message, photo=photo)
+                    await message.update_existing(self._status_message)
                     await self._send_bzz_message(message)
                 else:
-                    sent_message = await message.send(self._backend, self._chat_id, photo=photo)
+                    sent_message = await message.send(self._backend, self._chat_id)
                     if not self._status_message and not manual:
                         self._status_message = sent_message
 
             for group, message_thread_id in self._notify_groups:
-                photo.seek(0)
-                await self._backend.send_chat_action(chat_id=group, message_thread_id=message_thread_id, action=ChatAction.UPLOAD_PHOTO)
+                await self._backend.send_chat_action(chat_id=group, message_thread_id=message_thread_id, action=ChatAction.TYPING)
                 if group in self._groups_status_messages and not manual:
                     mess = self._groups_status_messages[group]
-                    await message.update_existing(mess, photo=photo)
+                    await message.update_existing(mess)
                 else:
-                    sent_message = await message.send(self._backend, group, photo=photo, message_thread_id=message_thread_id)
+                    sent_message = await message.send(self._backend, group, message_thread_id=message_thread_id)
                     if group in self._groups_status_messages or manual:
                         continue
                     self._groups_status_messages[group] = sent_message
 
-            photo.close()
+    async def _send_photo(self, message: TelegramMessageRepr, group_only: bool = False, manual: bool = False) -> None:
+        loop = asyncio.get_running_loop()
+        with await loop.run_in_executor(self._executors_pool, self._cam_wrap.take_photo) as photo:
+            async with self._status_lock:
+                if not group_only:
+                    if self._status_message and not manual:
+                        await message.update_existing(self._status_message, photo=photo)
+                        await self._send_bzz_message(message)
+                    else:
+                        sent_message = await message.send(self._backend, self._chat_id, photo=photo)
+                        if not self._status_message and not manual:
+                            self._status_message = sent_message
+
+                for group, message_thread_id in self._notify_groups:
+                    photo.seek(0)
+                    await self._backend.send_chat_action(chat_id=group, message_thread_id=message_thread_id, action=ChatAction.UPLOAD_PHOTO)
+                    if group in self._groups_status_messages and not manual:
+                        mess = self._groups_status_messages[group]
+                        await message.update_existing(mess, photo=photo)
+                    else:
+                        sent_message = await message.send(self._backend, group, photo=photo, message_thread_id=message_thread_id)
+                        if group in self._groups_status_messages or manual:
+                            continue
+                        self._groups_status_messages[group] = sent_message
+
+                photo.close()
 
     async def _notify(self, message: TelegramMessageRepr, group_only: bool = False, manual: bool = False, state: PrintState = PrintState.PRINTING) -> None:
         if state.is_finished:
@@ -394,19 +400,28 @@ class Notifier:
             reply_markup=self.get_status_keyboard(state=PrintState.NOTIFY_START),
         )
 
-        if not self._group_only:
-            status_message = await tg_message.send(self._backend, self._chat_id, bio)
-            self._status_message = status_message
+        async with self._status_lock:
+            if not self._group_only:
+                if self._status_message is None:
+                    self._status_message = await tg_message.send(self._backend, self._chat_id, bio)
+                else:
+                    # A status notification raced print start and already created the status
+                    # message — update it with the start info instead of sending a second message.
+                    bio.seek(0)
+                    await tg_message.update_existing(self._status_message, photo=bio)
 
-        for group_, message_thread_id in self._notify_groups:
-            bio.seek(0)
-            self._groups_status_messages[group_] = await tg_message.send(self._backend, group_, bio, message_thread_id)
+            for group_, message_thread_id in self._notify_groups:
+                bio.seek(0)
+                if group_ in self._groups_status_messages:
+                    await tg_message.update_existing(self._groups_status_messages[group_], photo=bio)
+                else:
+                    self._groups_status_messages[group_] = await tg_message.send(self._backend, group_, bio, message_thread_id)
 
-        bio.close()
+            bio.close()
 
-        if self._pin_status_single_message and self._status_message is not None:
-            await self._backend.unpin_all_chat_messages(self._chat_id)
-            await self._backend.pin_chat_message(self._chat_id, self._status_message.message_id, disable_notification=self.silent_status)
+            if self._pin_status_single_message and self._status_message is not None:
+                await self._backend.unpin_all_chat_messages(self._chat_id)
+                await self._backend.pin_chat_message(self._chat_id, self._status_message.message_id, disable_notification=self.silent_status)
 
     def send_print_start_info(self) -> None:
         if self._enabled:

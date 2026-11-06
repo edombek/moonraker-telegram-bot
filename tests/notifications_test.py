@@ -1,7 +1,12 @@
+import asyncio
+from io import BytesIO
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from notifications import Notifier
+from telegram_helper import TelegramMessageRepr
 
 
 def make_notifier(height: float = 5.0, percent: int = 0) -> Notifier:
@@ -154,3 +159,31 @@ def test_height_notification_guards() -> None:
     n._klippy.printing_duration = 0.0
     n.schedule_notification(position_z=5.0)
     assert n._schedule_notification.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_info_and_status_update_send_single_message() -> None:
+    # At print start, _send_print_start_info and an m117-triggered status update can run
+    # concurrently. Both must end up in one status message, not two.
+    n = make_notifier()
+    n._cam_wrap.enabled = False
+    n._progress_update_message = False
+
+    sent: list[AsyncMock] = []
+
+    async def fake_send(*_args: object, **_kwargs: object) -> AsyncMock:
+        msg = AsyncMock()
+        msg.caption = None
+        sent.append(msg)
+        return msg
+
+    backend = AsyncMock()
+    backend.send_message.side_effect = fake_send
+    backend.send_photo.side_effect = fake_send
+    n._backend = backend
+    n._klippy.get_file_info = AsyncMock(return_value=("start info text", BytesIO(b"photo")))
+
+    await asyncio.gather(n._send_message(TelegramMessageRepr(text="status")), n._send_print_start_info())
+
+    assert len(sent) == 1
+    assert n._status_message is sent[0]
